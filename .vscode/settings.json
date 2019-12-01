@@ -1,3 +1,4 @@
 {
-    "python.pythonPath": "/home/pranay/anaconda2/envs/visual_interference_openai/bin/python"
+    "python.pythonPath": "/home/pranay/anaconda2/envs/visual_interference_openai/bin/python",
+    "python.envFile": "${workspaceFolder}/.env"
 }

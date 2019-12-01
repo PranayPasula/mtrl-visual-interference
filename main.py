@@ -1,6 +1,6 @@
 import os
 import time
-from multiprocessing import Process
+from multiprocessing import Manager, Process
 from threading import Event
 
 import gym
@@ -9,13 +9,13 @@ import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
-from stable_baselines.common.cmd_util import make_atari_env
-from stable_baselines.common.vec_env import VecFrameStack
-from stable_baselines import DQN
+from stable_baselines_master.stable_baselines.common.cmd_util import make_atari_env
+from stable_baselines_master.stable_baselines.common.vec_env import VecFrameStack
+from stable_baselines_master.stable_baselines.deepq.dqn import DQN
 from stable_baselines_master.stable_baselines.common.evaluation import evaluate_policy
 
 import mysettings
-
+from mylogger import Logger
 
 if __name__ == '__main__':
 
@@ -28,11 +28,19 @@ if __name__ == '__main__':
             print('training at timestep {}...'.format(n_steps))
         n_steps += 1
 
-    n_indiv = 2
-    n_multi = 0
+    n_indiv = 1
+    n_multi = 3
 
-    env_names = ['MsPacmanNoFrameskip-v4', 'MsPacmanNoFrameskip-v4']
+    env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_indiv)]
+    multi_env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_multi)]
+
+    # # initialize replay buffer array for future storage and access by models
+    manager = Manager()
+    shared_replay_buffers = manager.list()
+    # envs = manager.list()
     envs = []
+    for indiv_num in range(n_indiv):
+        shared_replay_buffers.append(None)
 
     for env_name in env_names:
         env = make_atari_env(env_name, num_env=1, seed=0) # num_env might need to be 1 for WSL ubuntu
@@ -42,23 +50,28 @@ if __name__ == '__main__':
     indiv_models = []
     multi_models = []
 
-    # initialize replay buffer array for future storage and access by models
-    mysettings.init()
-    mysettings.replay_buffers = [None for i in range(n_indiv)]
-
-    def create_model_then_learn(model_type, model_num, policy_type, env, learning_starts=1000, prioritized_replay=False, batch_size=32, verbose=0):
-        assert model_type == ('i' or 'm'), "invalid model type"
+    def create_model_then_learn(shared_envs, shared_replay_buffers, model_type, model_num, policy_type, env, 
+                            learning_starts=100, prioritized_replay=False, batch_size=32, verbose=0):
+        global logdirs
+        assert model_type == 'i' or 'm', "invalid model type"
         if model_type == 'm':
             batch_size = n_indiv * batch_size
-        model = DQN(policy_type, env, learning_starts=learning_starts, prioritized_replay=prioritized_replay, batch_size=batch_size, verbose=verbose)
+        model = DQN(policy_type, env, learning_starts=learning_starts, 
+                    prioritized_replay=prioritized_replay, batch_size=batch_size, verbose=verbose, shared_replay_buffers=shared_replay_buffers)
         model.model_type = model_type
         model.model_num = model_num
-        assert model_type == ('i' or 'm'), "invalid model type"
-        model_type_str = 'indiv' if model_type == 'i' else 'm'
+
+        if model_type == 'i':
+            model.indiv_logger = Logger(logdirs['indiv'][model_num])
+        elif model_type == 'm':
+            for indiv_num in range(n_indiv):
+                model.multi_loggers[indiv_num] = Logger(logdirs['multi'][model_num][indiv_num])
+
+        model_type_str = 'indiv' if model_type == 'i' else 'multi'
         print("{} task DQN {} created".format(model_type_str, model_num))
         print("{} task DQN {} begins learning...".format(model_type_str, model_num))
 
-        model.learn(total_timesteps=1100, callback=callback)
+        model.learn(total_timesteps=10000, callback=callback, tb_log_name="DQN_{}_{}".format(model_type, model_num))
 
         print("{} task DQN {} done learning!".format(model_type_str, model_num))
 
@@ -67,42 +80,68 @@ if __name__ == '__main__':
         else:
             multi_models.append(model)
 
+    # create directories to log and set up loggers
+    data_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
+    # if not os.path.exists(data_path):
+    #     os.makedirs(data_path)
+    
+    run_dir = os.path.join(data_path, time.strftime("%d-%m-%Y_%H-%M-%S"))
+
+    logdirs = {'indiv' : [None for i in range(n_indiv)], 
+               'multi' : [[None for i in range(n_indiv)] for j in range(n_multi)]}
+
+    for indiv_num in range(n_indiv):
+        logdir = "DQN_indiv_{}_{}".format(indiv_num, env_names[indiv_num])
+        logdir = os.path.join(run_dir, logdir)
+        logdirs['indiv'][indiv_num] = logdir
+        if not os.path.exists(logdir):
+            os.makedirs(logdir)
+
+    for multi_num in range(n_multi):
+        for indiv_num in range(n_indiv):
+            above_logdir = "DQN_multi_{}".format(multi_num)
+            logdir = "{}_{}".format(indiv_num, env_names[indiv_num])
+            logdir = os.path.join(run_dir, above_logdir, logdir)
+            logdirs['multi'][multi_num][indiv_num] = logdir
+            if not os.path.exists(logdir):
+                os.makedirs(logdir)
 
     indiv_processes = []
     multi_processes = []
 
+    # do i need to pass events to processes? i.e. would processes share events as code is now or no
     # events used to synchronize indiv and multitask model access to replay buffers
-    indiv_rb_dones = [Event for indiv_num in range(n_indiv)]
-    multi_rb_dones = [Event for multi_num in range(n_multi)]
+    indiv_rb_dones = [Event() for indiv_num in range(n_indiv)]
+    multi_rb_dones = [Event() for multi_num in range(n_multi)]
 
     # set to true so indiv task agents can go first
     for multi_rb_done in multi_rb_dones:
         multi_rb_done.set()
 
-    replay_buffers = [None for indiv_num in range(n_indiv)] # TODO make this visible to models
-
     args = {'learning_starts' : 1000,
-            'prioritized_replay' : True,
+            'prioritized_replay' : False,
             'batch_size' : 32,
             'verbose' : 1}
-            
+
     # spawn indiv task model processes
     for indiv_num in range(n_indiv):
-        p = Process(target=create_model_then_learn, args=('i', indiv_num, 'CnnPolicy', envs[indiv_num]), kwargs=args)
+        p = Process(target=create_model_then_learn, args=(envs, shared_replay_buffers, 'i', indiv_num, 'CnnPolicy', envs[indiv_num]), kwargs=args)
         print('indiv process made')
         indiv_processes.append(p)
-
-    # spawn multitask model processes
-    for multi_num in range(n_multi):
-        p = Process(target=create_model_then_learn, args=('m', multi_num, 'CnnPolicy', envs[multi_num]), kwargs=args) # TODO modify learn() to differentiate b/t indiv and multi model
-        print('mt process made')
-        multi_processes.append(p)
 
     # start indiv task model processes
     for indiv_process in indiv_processes:
         print('indiv start')
         indiv_process.start()
         time.sleep(1) 
+
+    time.sleep(4)
+
+    # spawn multitask model processes
+    for multi_num in range(n_multi):
+        p = Process(target=create_model_then_learn, args=(envs, shared_replay_buffers, 'm', multi_num, 'CnnPolicy', multi_env_names[multi_num]), kwargs=args) # TODO modify learn() to differentiate b/t indiv and multi model
+        print('mt process made')
+        multi_processes.append(p)
 
     # start multitask model processes
     for multi_process in multi_processes:
