@@ -1,0 +1,22 @@
+# critical
+
+! 1. synchronize dqns
+
+COMPLETE! 2. share envs or find another way to evaluate mt dqns on indiv task envs
+
+! 3. load and keep all models in gpu memory. backprop through gpu.
+
+! 4. handle action space differences across tasks
+
+COMPLETE! 5. fix "obses_t referenced before assignment" bug
+
+! 6. evaluate mt dqn on all indiv tasks and log results
+-UPDATE: eval done but need to finish logging
+
+! 7. specify and create diff mt dqn architectures
+
+---
+
+# important but not essential
+
+8. add save/load model functionality

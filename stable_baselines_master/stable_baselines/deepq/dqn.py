@@ -5,14 +5,14 @@ import tensorflow as tf
 import numpy as np
 import gym
 
-from stable_baselines_master.stable_baselines import logger, deepq
-from stable_baselines_master.stable_baselines.common import tf_util, OffPolicyRLModel, SetVerbosity, TensorboardWriter
-from stable_baselines_master.stable_baselines.common.evaluation import evaluate_policy # MYEDIT
-from stable_baselines_master.stable_baselines.common.vec_env import VecEnv
-from stable_baselines_master.stable_baselines.common.schedules import LinearSchedule
-from stable_baselines_master.stable_baselines.deepq.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
-from stable_baselines_master.stable_baselines.deepq.policies import DQNPolicy
-from stable_baselines_master.stable_baselines.a2c.utils import total_episode_reward_logger
+from stable_baselines import logger, deepq
+from stable_baselines.common import tf_util, OffPolicyRLModel, SetVerbosity, TensorboardWriter
+from stable_baselines.common.evaluation import evaluate_policy # MYEDIT
+from stable_baselines.common.vec_env import VecEnv, VecFrameStack
+from stable_baselines.common.schedules import LinearSchedule
+from stable_baselines.deepq.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
+from stable_baselines.deepq.policies import DQNPolicy
+from stable_baselines.a2c.utils import total_episode_reward_logger
 
 import mysettings # for global replay buffers
 
@@ -58,14 +58,15 @@ class DQN(OffPolicyRLModel):
                  learning_starts=1000, target_network_update_freq=500, prioritized_replay=False,
                  prioritized_replay_alpha=0.6, prioritized_replay_beta0=0.4, prioritized_replay_beta_iters=None,
                  prioritized_replay_eps=1e-6, param_noise=False, verbose=0, tensorboard_log=None,
-                 _init_setup_model=True, policy_kwargs=None, full_tensorboard_log=False, shared_replay_buffers=None):
+                 _init_setup_model=True, policy_kwargs=None, full_tensorboard_log=False, shared_replay_buffers=None, 
+                 shared_envs=None, model_type=None, model_num=None):
 
         # TODO: replay_buffer refactoring
         super(DQN, self).__init__(policy=policy, env=env, replay_buffer=None, verbose=verbose, policy_base=DQNPolicy,
                                   requires_vec_env=False, policy_kwargs=policy_kwargs)
 
-        self.model_type = None # MYEDIT 'i' for individual task model or 'm' for multitask model
-        self.model_num = None # MYEDIT a value in {0, 1, 2,..., total # of this type model}
+        self.model_type = model_type # MYEDIT 'i' for individual task model or 'm' for multitask model
+        self.model_num = model_num # MYEDIT a value in {0, 1, 2,..., total # of this type model}
 
         self.param_noise = param_noise
         self.learning_starts = learning_starts
@@ -102,6 +103,7 @@ class DQN(OffPolicyRLModel):
 
         # MYEDIT hacky inits
         self.shared_replay_buffers = shared_replay_buffers
+        self.shared_envs = shared_envs
         self.indiv_best_mean_100eq_reward = -np.inf
         self.multi_best_mean_100eq_rewards = [-np.inf for i in range(len(self.shared_replay_buffers))]
         self.indiv_logger = None
@@ -115,10 +117,10 @@ class DQN(OffPolicyRLModel):
         return policy.obs_ph, tf.placeholder(tf.int32, [None]), policy.q_values
 
     def setup_model(self):
-
+        print(self.shared_envs[0])
         with SetVerbosity(self.verbose):
             assert not isinstance(self.action_space, gym.spaces.Box), \
-                "Error: DQN cannot output a gym.spaces.Box action space."
+                "Error: DQN cannot output a gym.spaces.Box action space."  
 
             # If the policy is wrap in functool.partial (e.g. to disable dueling)
             # unwrap it to check the class type
@@ -165,7 +167,7 @@ class DQN(OffPolicyRLModel):
 
         with SetVerbosity(self.verbose), TensorboardWriter(self.graph, self.tensorboard_log, tb_log_name, new_tb_log) \
                 as writer:
-            self._setup_learn(seed)
+            self._setup_learn()
 
             if self.model_type == 'i': # MYEDIT skip steps in the DQN algorithm if multitask model
                 # Create the replay buffer
@@ -230,6 +232,8 @@ class DQN(OffPolicyRLModel):
                     env_action = action
                     reset = False
                     new_obs, rew, done, info = self.env.step(env_action)
+                    # update shared_envs after stepping env
+                    self.shared_envs[self.model_num] = self.env.unwrapped
                     # Store transition in the replay buffer.
                     self.replay_buffer.add(obs, action, rew, new_obs, float(done))
                     obs = new_obs
@@ -268,24 +272,24 @@ class DQN(OffPolicyRLModel):
                             obses_t, actions, rewards, obses_tp1, dones = self.replay_buffer.sample(self.batch_size)
                             weights, batch_idxes = np.ones_like(rewards), None
 
-                    # bug with last line: "local variable 'obses_t' referenced before assignment"
-                    # if writer is not None:
-                    #     # run loss backprop with summary, but once every 100 steps save the metadata
-                    #     # (memory, compute time, ...)
-                    #     if (1 + self.num_timesteps) % 100 == 0:
-                    #         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                    #         run_metadata = tf.RunMetadata()
-                    #         summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
-                    #                                               dones, weights, sess=self.sess, options=run_options,
-                    #                                               run_metadata=run_metadata)
-                    #         writer.add_run_metadata(run_metadata, 'step%d' % self.num_timesteps)
-                    #     else:
-                    #         summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
-                    #                                               dones, weights, sess=self.sess)
-                    #     writer.add_summary(summary, self.num_timesteps)
-                    # else:
-                    #     _, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights,
-                    #                                 sess=self.sess)
+                        # bug with last line: "local variable 'obses_t' referenced before assignment"
+                        if writer is not None:
+                            # run loss backprop with summary, but once every 100 steps save the metadata
+                            # (memory, compute time, ...)
+                            if (1 + self.num_timesteps) % 100 == 0:
+                                run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                                run_metadata = tf.RunMetadata()
+                                summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
+                                                                        dones, weights, sess=self.sess, options=run_options,
+                                                                        run_metadata=run_metadata)
+                                writer.add_run_metadata(run_metadata, 'step%d' % self.num_timesteps)
+                            else:
+                                summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
+                                                                        dones, weights, sess=self.sess)
+                            writer.add_summary(summary, self.num_timesteps)
+                        else:
+                            _, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights,
+                                                        sess=self.sess)
 
                     if self.prioritized_replay:
                             new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
@@ -300,7 +304,7 @@ class DQN(OffPolicyRLModel):
                     n_indiv = len(self.shared_replay_buffers)
                     indiv_model_batch_size = int(self.batch_size / n_indiv) # bc (multi model batch size) = n_indiv * (indiv model batch size)
                     can_samples = [self.shared_replay_buffers[i].can_sample(indiv_model_batch_size) for i in range(n_indiv)]
-                    print('n_indiv')    
+
                     # don't train if warmup phase is not over or if there aren't enough samples in replay buffers.
                     # all(can_sample) is hacky but simplifies code and shouldn't affect results.
                     if all(can_samples) and self.num_timesteps > self.learning_starts \
@@ -323,7 +327,6 @@ class DQN(OffPolicyRLModel):
                                     experience = np.concatenate((experience, exp_buff), axis=1)
                             # since we sorted by replay buffer index, randomize the order of experiences
                             assert experience.shape[1] == self.batch_size, "error: number of multitask model experiences != multitask model batch size"
-                            # randomized_idxes = np.random.choice(self.batch_size, size=self.batch_size, replace=False)
                             randomized_idxes = np.random.choice(experience.shape[1], size=experience.shape[1], replace=False)
                             experience = experience[:, randomized_idxes]
                             (obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes) = experience
@@ -357,12 +360,13 @@ class DQN(OffPolicyRLModel):
                                 summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
                                                                     dones, weights, sess=self.sess)
                             writer.add_summary(summary, self.num_timesteps)
-                        else:
+                        else:                            
                             _, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights,
                                                             sess=self.sess)
 
                         if self.prioritized_replay:
                             new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
+                            # TODO
                             # below line won't work correctly for multitask models because 
                             # batch_idxes alone doesn't differentiate source replay buffers
                             raise NotImplementedError
@@ -373,7 +377,7 @@ class DQN(OffPolicyRLModel):
                         # Update target network periodically.
                         self.update_target(sess=self.sess)
 
-                if self.num_timesteps % 10000 == 0:
+                if (1 + self.num_timesteps) % 1000 == 0:
                     if self.model_type == 'i':
                         if len(episode_rewards[-101:-1]) == 0:
                             mean_100ep_reward = -np.inf
@@ -384,32 +388,36 @@ class DQN(OffPolicyRLModel):
                         self.indiv_best_mean_100eq_reward = max(self.indiv_best_mean_100eq_reward, mean_100ep_reward)
                     elif self.model_type =='m':
                         for indiv_task_num in range(len(self.shared_replay_buffers)):
+                            # envs in shared_envs are unwrapped, so wrap before evaluating policy
+                            eval_env = VecFrameStack(self.shared_envs[indiv_task_num], n_stack=4)
+                            print("shared env {} is {}".format(indiv_task_num, eval_env))
                             # calling a function inside of a method by passing in self feels like bad practice
-                            # TODO
-                            episode_rewards, _ = evaluate_policy(self, shared_envs[indiv_task_num],
-                                                            n_eval_episodes=100, return_episode_rewards=True)
+                            episode_rewards, _ = evaluate_policy(self, eval_env, n_eval_episodes=10, return_episode_rewards=False)
+                            print("multi agent {} has rewards {} on task {}".format(self.model_num, episode_rewards, indiv_task_num))
                             mean_100ep_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
                             std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)
                     
                     
 
-                num_episodes = len(episode_rewards)
-                if self.verbose >= 1 and done and log_interval is not None and len(episode_rewards) % log_interval == 0:
-                    logger.record_tabular("steps", self.num_timesteps)
-                    logger.record_tabular("episodes", num_episodes)
-                    # MYEDIT no need to track successes
-                    # if len(episode_successes) > 0:
-                    #     logger.logkv("success rate", np.mean(episode_successes[-100:]))
-                    logger.record_tabular("mean 100 episode reward", mean_100ep_reward)
-                    logger.record_tabular("% time spent exploring",
-                                        int(100 * self.exploration.value(self.num_timesteps)))
-                    logger.dump_tabular()
+                # num_episodes = len(episode_rewards)
+                # if self.verbose >= 1 and done and log_interval is not None and len(episode_rewards) % log_interval == 0:
+                #     logger.record_tabular("steps", self.num_timesteps)
+                #     logger.record_tabular("episodes", num_episodes)
+                #     # MYEDIT no need to track successes
+                #     # if len(episode_successes) > 0:
+                #     #     logger.logkv("success rate", np.mean(episode_successes[-100:]))
+                #     logger.record_tabular("mean 100 episode reward", mean_100ep_reward)
+                #     logger.record_tabular("% time spent exploring",
+                #                         int(100 * self.exploration.value(self.num_timesteps)))
+                #     logger.dump_tabular()
 
 
                 self.num_timesteps += 1
 
         return self
 
+    # MYEDIT TODO (make sure of this) predict is used for evaluation only,
+    # so don't need to do anything with shared_envs monitor list here
     def predict(self, observation, state=None, mask=None, deterministic=True):
         observation = np.array(observation)
         vectorized_env = self._is_vectorized_observation(observation, self.observation_space)
