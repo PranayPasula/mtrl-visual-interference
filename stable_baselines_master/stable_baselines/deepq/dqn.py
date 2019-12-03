@@ -58,15 +58,14 @@ class DQN(OffPolicyRLModel):
                  learning_starts=1000, target_network_update_freq=500, prioritized_replay=False,
                  prioritized_replay_alpha=0.6, prioritized_replay_beta0=0.4, prioritized_replay_beta_iters=None,
                  prioritized_replay_eps=1e-6, param_noise=False, verbose=0, tensorboard_log=None,
-                 _init_setup_model=True, policy_kwargs=None, full_tensorboard_log=False, shared_replay_buffers=None, 
-                 shared_envs=None, model_type=None, model_num=None):
+                 _init_setup_model=True, policy_kwargs=None, full_tensorboard_log=False, shared_stuff=None):
 
         # TODO: replay_buffer refactoring
         super(DQN, self).__init__(policy=policy, env=env, replay_buffer=None, verbose=verbose, policy_base=DQNPolicy,
                                   requires_vec_env=False, policy_kwargs=policy_kwargs)
 
-        self.model_type = model_type # MYEDIT 'i' for individual task model or 'm' for multitask model
-        self.model_num = model_num # MYEDIT a value in {0, 1, 2,..., total # of this type model}
+        self.model_type = None # MYEDIT 'i' for individual task model or 'm' for multitask model
+        self.model_num = None # MYEDIT a value in {0, 1, 2,..., total # of this type model}
 
         self.param_noise = param_noise
         self.learning_starts = learning_starts
@@ -102,12 +101,11 @@ class DQN(OffPolicyRLModel):
         self.episode_reward = None
 
         # MYEDIT hacky inits
-        self.shared_replay_buffers = shared_replay_buffers
-        self.shared_envs = shared_envs
+        self.shared_stuff = shared_stuff
         self.indiv_best_mean_100eq_reward = -np.inf
-        self.multi_best_mean_100eq_rewards = [-np.inf for i in range(len(self.shared_replay_buffers))]
+        self.multi_best_mean_100eq_rewards = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
         self.indiv_logger = None
-        self.multi_loggers = [None for i in range(len(self.shared_replay_buffers))]
+        self.multi_loggers = [None for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
 
         if _init_setup_model:
             self.setup_model()
@@ -117,7 +115,6 @@ class DQN(OffPolicyRLModel):
         return policy.obs_ph, tf.placeholder(tf.int32, [None]), policy.q_values
 
     def setup_model(self):
-        print(self.shared_envs[0])
         with SetVerbosity(self.verbose):
             assert not isinstance(self.action_space, gym.spaces.Box), \
                 "Error: DQN cannot output a gym.spaces.Box action space."  
@@ -161,8 +158,6 @@ class DQN(OffPolicyRLModel):
     def learn(self, total_timesteps, callback=None, seed=None, log_interval=100, tb_log_name="DQN",
               reset_num_timesteps=True, replay_wrapper=None):
 
-        # global self.shared_replay_buffers
-
         new_tb_log = self._init_num_timesteps(reset_num_timesteps)
 
         with SetVerbosity(self.verbose), TensorboardWriter(self.graph, self.tensorboard_log, tb_log_name, new_tb_log) \
@@ -184,7 +179,7 @@ class DQN(OffPolicyRLModel):
                     self.replay_buffer = ReplayBuffer(self.buffer_size)
                     self.beta_schedule = None
 
-                self.shared_replay_buffers[self.model_num] = self.replay_buffer # MYEDIT
+                self.shared_stuff['indiv_replay_buffers'][self.model_num] = self.replay_buffer # MYEDIT
 
                 if replay_wrapper is not None:
                     assert not self.prioritized_replay, "Prioritized replay buffer is not supported by HER"
@@ -232,8 +227,9 @@ class DQN(OffPolicyRLModel):
                     env_action = action
                     reset = False
                     new_obs, rew, done, info = self.env.step(env_action)
-                    # update shared_envs after stepping env
-                    self.shared_envs[self.model_num] = self.env.unwrapped
+                    # Update shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
+                    if self.num_timesteps % 100 == 0:
+                        self.shared_stuff['unwrapped_indiv_envs'][self.model_num] = self.env.unwrapped
                     # Store transition in the replay buffer.
                     self.replay_buffer.add(obs, action, rew, new_obs, float(done))
                     obs = new_obs
@@ -301,9 +297,9 @@ class DQN(OffPolicyRLModel):
                         self.update_target(sess=self.sess)
 
                 elif self.model_type == 'm':
-                    n_indiv = len(self.shared_replay_buffers)
+                    n_indiv = len(self.shared_stuff['indiv_replay_buffers'])
                     indiv_model_batch_size = int(self.batch_size / n_indiv) # bc (multi model batch size) = n_indiv * (indiv model batch size)
-                    can_samples = [self.shared_replay_buffers[i].can_sample(indiv_model_batch_size) for i in range(n_indiv)]
+                    can_samples = [self.shared_stuff['indiv_replay_buffers'][i].can_sample(indiv_model_batch_size) for i in range(n_indiv)]
 
                     # don't train if warmup phase is not over or if there aren't enough samples in replay buffers.
                     # all(can_sample) is hacky but simplifies code and shouldn't affect results.
@@ -318,7 +314,7 @@ class DQN(OffPolicyRLModel):
                         experience = np.array([])
                         if self.prioritized_replay:
                             for (buffer_idx, sample_size) in zip(buffers_to_sample, sample_sizes):
-                                exp_buff = self.shared_replay_buffers[buffer_idx].sample(sample_size,
+                                exp_buff = self.shared_stuff['indiv_replay_buffers'][buffer_idx].sample(sample_size,
                                                                                 beta=self.beta_schedule.value(self.num_timesteps))
                                 exp_buff = np.asarray(exp_buff) # bc prioritized replay buffer sample() returns tuple
                                 if experience.shape[0] == 0:
@@ -332,7 +328,7 @@ class DQN(OffPolicyRLModel):
                             (obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes) = experience
                         else:
                             for (buffer_idx, sample_size) in zip(buffers_to_sample, sample_sizes):
-                                obses_t, actions, rewards, obses_tp1, dones = self.shared_replay_buffers[buffer_idx].sample(sample_size)
+                                obses_t, actions, rewards, obses_tp1, dones = self.shared_stuff['indiv_replay_buffers'][buffer_idx].sample(sample_size)
                                 weights, batch_idxes = np.ones_like(rewards), None
                                 exp_buff = np.asarray([obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes])
                                 if experience.shape[0] == 0:
@@ -377,7 +373,7 @@ class DQN(OffPolicyRLModel):
                         # Update target network periodically.
                         self.update_target(sess=self.sess)
 
-                if (1 + self.num_timesteps) % 1000 == 0:
+                if self.num_timesteps % 100 == 0:
                     if self.model_type == 'i':
                         if len(episode_rewards[-101:-1]) == 0:
                             mean_100ep_reward = -np.inf
@@ -387,9 +383,9 @@ class DQN(OffPolicyRLModel):
                             std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)
                         self.indiv_best_mean_100eq_reward = max(self.indiv_best_mean_100eq_reward, mean_100ep_reward)
                     elif self.model_type =='m':
-                        for indiv_task_num in range(len(self.shared_replay_buffers)):
-                            # envs in shared_envs are unwrapped, so wrap before evaluating policy
-                            eval_env = VecFrameStack(self.shared_envs[indiv_task_num], n_stack=4)
+                        for indiv_task_num in range(len(self.shared_stuff['indiv_replay_buffers'])):
+                            # envs in shared_stuff['unwrapped_indiv_envs'] are unwrapped, so wrap before evaluating policy
+                            eval_env = VecFrameStack(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num], n_stack=4)
                             print("shared env {} is {}".format(indiv_task_num, eval_env))
                             # calling a function inside of a method by passing in self feels like bad practice
                             episode_rewards, _ = evaluate_policy(self, eval_env, n_eval_episodes=10, return_episode_rewards=False)
@@ -417,7 +413,7 @@ class DQN(OffPolicyRLModel):
         return self
 
     # MYEDIT TODO (make sure of this) predict is used for evaluation only,
-    # so don't need to do anything with shared_envs monitor list here
+    # so don't need to do anything with shared_stuff['unwrapped_indiv_envs'] monitor list here
     def predict(self, observation, state=None, mask=None, deterministic=True):
         observation = np.array(observation)
         vectorized_env = self._is_vectorized_observation(observation, self.observation_space)

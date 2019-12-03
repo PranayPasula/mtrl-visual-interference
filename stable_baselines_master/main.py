@@ -1,7 +1,6 @@
 import os
 import time
 from multiprocessing import Manager, Process
-from threading import Event
 
 import gym
 import numpy as np
@@ -41,18 +40,19 @@ if __name__ == '__main__':
 
     # # initialize replay buffer array for future storage and access by models
     manager = Manager()
-    shared_replay_buffers = manager.list()
-    shared_envs = manager.list()
+    shared_stuff = manager.dict(unwrapped_indiv_envs=manager.list([None for i in range(n_indiv)]),
+                                indiv_replay_buffers=manager.list([None for i in range(n_indiv)]),
+                                indiv_allow=None,
+                                multi_allow=None,
+                                indiv_buffer_dones=None,
+                                multi_buffer_dones=None)
+
     indiv_envs = []
     multi_envs = []
 
-    for indiv_num in range(n_indiv):
-        shared_replay_buffers.append(None)
-        shared_envs.append(None)
-
     for env_name in env_names:
         env = make_atari_env(env_name, num_env=1, seed=0) # num_env might need to be 1 for WSL ubuntu. will throw multiprocessing error otherwise
-        shared_envs.append(env) # must be before VecFrameStack bc can't pickle VecFrameStack object
+        # unwrapped_indiv_envs.append(env) # must be before VecFrameStack bc can't pickle VecFrameStack object
         env = VecFrameStack(env, n_stack=4)
         indiv_envs.append(env)
 
@@ -61,10 +61,56 @@ if __name__ == '__main__':
         env = VecFrameStack(env, n_stack=4)
         multi_envs.append(env)
 
+    """
+        Events for synchronizing access to replay buffers.
+
+        Access requirements are
+            for individual task DQNs: indiv_allow is T and multi_buffer_dones are all T
+            for multitask DQNs:       multi_allow is T and indiv_buffer_dones are all T
+
+        Initializations are
+            indiv_allow = T
+            multi_allow = F
+            indiv_buffer_dones = T
+            multi_buffer_dones = T,
+        and are set so that individual task DQNs always access the buffers first.
+    """
+    indiv_allow = manager.Event()
+    indiv_allow.set()
+    multi_allow = manager.Event()
+    indiv_buffer_dones = manager.list()
+    multi_buffer_dones = manager.list()
+    for i in range(n_indiv):
+        indiv_buffer_done = manager.Event()
+        indiv_buffer_done.set()
+        indiv_buffer_dones.append(indiv_buffer_done)
+    for i in range(n_multi):
+        multi_buffer_done = manager.Event()
+        multi_buffer_done.set()
+        multi_buffer_dones.append(multi_buffer_done)
+    import pdb; pdb.set_trace()
+
+    # buffer_sync_events = {'indiv_allow': []
+    #                       }    
+    # indiv_allow = manager.Event()
+    # indiv_allow.set()
+    # multi_allow = manager.Event()
+    # indiv_buffer_dones = manager.list([manager.Event() for i in range(n_indiv)])
+    # multi_buffer_dones = manager.list([manager.Event() for i in range(n_multi)])
+    # import pdb; pdb.set_trace()
+    # for i in range(n_indiv):
+    #     indiv_buffer_dones[i].set()
+    # for i in range(n_multi):
+    #     multi_buffer_dones[i].set()
+    # shared_stuff['indiv_allow'] = indiv_allow
+    # shared_stuff['multi_allow'] = multi_allow
+    # shared_stuff['indiv_buffer_dones'] = indiv_buffer_dones
+    # shared_stuff['multi_buffer_dones'] = multi_buffer_dones
+
     indiv_models = []
     multi_models = []
 
-    def create_model_then_learn(shared_envs, shared_replay_buffers, model_type, model_num, policy_type, env, 
+    def create_model_then_learn(shared_stuff, model_type, model_num, policy_type, env, 
                             learning_starts=100, prioritized_replay=False, batch_size=32, verbose=0):
         global logdirs
         assert model_type == 'i' or 'm', "invalid model type"
@@ -72,8 +118,7 @@ if __name__ == '__main__':
             batch_size = n_indiv * batch_size
             
         model = DQN(policy_type, env, learning_starts=learning_starts, prioritized_replay=prioritized_replay, 
-                    batch_size=batch_size, verbose=verbose, 
-                    shared_replay_buffers=shared_replay_buffers, shared_envs=shared_envs)
+                    batch_size=batch_size, verbose=verbose, shared_stuff=shared_stuff)
         model.model_type = model_type
         model.model_num = model_num
 
@@ -91,6 +136,7 @@ if __name__ == '__main__':
 
         print("{} task DQN {} done learning!".format(model_type_str, model_num))
 
+        # TODO the following block isn't used
         if model_type == 'i':
             indiv_models.append(model)
         else:
@@ -117,26 +163,17 @@ if __name__ == '__main__':
                 os.makedirs(logdir)
 
     indiv_processes = []
-    multi_processes = []
+    multi_processes = [] 
 
-    # do i need to pass events to processes? i.e. would processes share events as code is now or no
-    # events used to synchronize indiv and multitask model access to replay buffers
-    indiv_rb_dones = [Event() for indiv_num in range(n_indiv)]
-    multi_rb_dones = [Event() for multi_num in range(n_multi)]
-
-    # set to true so indiv task agents can go first
-    for multi_rb_done in multi_rb_dones:
-        multi_rb_done.set()
-
-    args = {'learning_starts' : 100,
-            'prioritized_replay' : False,
-            'batch_size' : 32,
-            'verbose' : 1}
+    args = {'learning_starts': 100,
+            'prioritized_replay': False,
+            'batch_size': 32,
+            'verbose': 1}
 
     # spawn indiv task model processes
     for indiv_num in range(n_indiv):
         p = Process(target=create_model_then_learn, 
-                        args=(shared_envs, shared_replay_buffers, 'i', 
+                        args=(shared_stuff, 'i', 
                             indiv_num, 'CnnPolicy', indiv_envs[indiv_num]), kwargs=args)
         print('indiv process made')
         indiv_processes.append(p)
@@ -144,8 +181,8 @@ if __name__ == '__main__':
     # spawn multitask model processes
     for multi_num in range(n_multi):
         p = Process(target=create_model_then_learn,
-                        args=(shared_envs, shared_replay_buffers, 'm',
-                            multi_num, 'CnnPolicy', multi_envs[multi_num]), kwargs=args) # TODO modify learn() to differentiate b/t indiv and multi model
+                        args=(shared_stuff, 'm',
+                            multi_num, 'CnnPolicy', multi_envs[multi_num]), kwargs=args)
         print('mt process made')
         multi_processes.append(p)
 

@@ -1,3 +1,7 @@
 {
-    "python.pythonPath": "/home/pranay/anaconda2/envs/visual_interference_openai/bin/python"
+    "python.pythonPath": "/home/pranay/anaconda2/envs/visual_interference_openai/bin/python",
+    "vsintellicode.java.completionsEnabled": false,
+    "vsintellicode.modify.editor.suggestSelection": "disabled",
+    "vsintellicode.sql.completionsEnabled": false,
+    "vsintellicode.python.completionsEnabled": false
 }
