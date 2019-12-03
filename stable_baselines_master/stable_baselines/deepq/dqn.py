@@ -196,9 +196,9 @@ class DQN(OffPolicyRLModel):
             obs = self.env.reset()
             reset = True
             self.episode_reward = np.zeros((1,))
-
+            start_time = time.time()
             for _ in range(total_timesteps):
-
+                
                 if callback is not None:
                         # Only stop training if return value is False, not when it is None. This is for backwards
                         # compatibility with callbacks that have no return statement.
@@ -430,7 +430,8 @@ class DQN(OffPolicyRLModel):
                         # Update target network periodically.
                         self.update_target(sess=self.sess)
 
-                if (1 + self.num_timesteps) % 1000 == 0:
+                if (1 + self.num_timesteps) % 100 == 0:
+                    print(time.time() - start_time)
                     if self.model_type == 'i':
                         if len(episode_rewards[-101:-1]) == 0:
                             mean_100ep_reward = -np.inf
