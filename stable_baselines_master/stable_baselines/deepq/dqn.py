@@ -199,12 +199,18 @@ class DQN(OffPolicyRLModel):
 
             for _ in range(total_timesteps):
 
-                if self.model_type == 'i': # MYEDIT skip taking action, updating exploration, and adding to replay buffer if multitask model
-                    if callback is not None:
+                if callback is not None:
                         # Only stop training if return value is False, not when it is None. This is for backwards
                         # compatibility with callbacks that have no return statement.
                         if callback(locals(), globals()) is False:
                             break
+
+                if self.model_type == 'i': # MYEDIT skip taking action, updating exploration, and adding to replay buffer if multitask model
+                    # if callback is not None:
+                    #     # Only stop training if return value is False, not when it is None. This is for backwards
+                    #     # compatibility with callbacks that have no return statement.
+                    #     if callback(locals(), globals()) is False:
+                    #         break
                     # Take action and update exploration to the newest value
                     kwargs = {}
                     if not self.param_noise:
@@ -227,11 +233,21 @@ class DQN(OffPolicyRLModel):
                     env_action = action
                     reset = False
                     new_obs, rew, done, info = self.env.step(env_action)
-                    # Update shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
+
+                    # Update self.shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
                     if self.num_timesteps % 100 == 0:
                         self.shared_stuff['unwrapped_indiv_envs'][self.model_num] = self.env.unwrapped
+      
                     # Store transition in the replay buffer.
+
+                    if self.num_timesteps > self.learning_starts:
+                        self.shared_stuff['indiv_allow'].wait()
+                        self.shared_stuff['multi_allow'].clear()
                     self.replay_buffer.add(obs, action, rew, new_obs, float(done))
+                    if self.num_timesteps > self.learning_starts:
+                        self.shared_stuff['indiv_allow'].clear()
+                        self.shared_stuff['multi_allow'].set()
+                        self.shared_stuff['learning_starts_ev'].set()
                     obs = new_obs
 
                     if writer is not None:
@@ -297,6 +313,9 @@ class DQN(OffPolicyRLModel):
                         self.update_target(sess=self.sess)
 
                 elif self.model_type == 'm':
+                    if not self.shared_stuff['learning_starts_ev'].is_set():
+                        self.shared_stuff['multi_allow'].wait()
+                        self.num_timesteps = self.learning_starts + 1
                     n_indiv = len(self.shared_stuff['indiv_replay_buffers'])
                     indiv_model_batch_size = int(self.batch_size / n_indiv) # bc (multi model batch size) = n_indiv * (indiv model batch size)
                     can_samples = [self.shared_stuff['indiv_replay_buffers'][i].can_sample(indiv_model_batch_size) for i in range(n_indiv)]
@@ -313,6 +332,10 @@ class DQN(OffPolicyRLModel):
                         # Minimize the error in Bellman's equation on a batch sampled from replay buffer.
                         experience = np.array([])
                         if self.prioritized_replay:
+
+                            self.shared_stuff['multi_allow'].wait()
+                            self.shared_stuff['indiv_allow'].clear()
+
                             for (buffer_idx, sample_size) in zip(buffers_to_sample, sample_sizes):
                                 exp_buff = self.shared_stuff['indiv_replay_buffers'][buffer_idx].sample(sample_size,
                                                                                 beta=self.beta_schedule.value(self.num_timesteps))
@@ -321,25 +344,59 @@ class DQN(OffPolicyRLModel):
                                     experience = exp_buff
                                 else:
                                     experience = np.concatenate((experience, exp_buff), axis=1)
+                            
+                            self.shared_stuff['multi_allow'].clear()
+                            self.shared_stuff['indiv_allow'].set()
+
                             # since we sorted by replay buffer index, randomize the order of experiences
                             assert experience.shape[1] == self.batch_size, "error: number of multitask model experiences != multitask model batch size"
                             randomized_idxes = np.random.choice(experience.shape[1], size=experience.shape[1], replace=False)
                             experience = experience[:, randomized_idxes]
                             (obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes) = experience
                         else:
+                            obses_t, actions, rewards, obses_tp1, dones, weights = np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([])
+                            self.shared_stuff['multi_allow'].wait()
+                            self.shared_stuff['indiv_allow'].clear()
+
                             for (buffer_idx, sample_size) in zip(buffers_to_sample, sample_sizes):
-                                obses_t, actions, rewards, obses_tp1, dones = self.shared_stuff['indiv_replay_buffers'][buffer_idx].sample(sample_size)
-                                weights, batch_idxes = np.ones_like(rewards), None
-                                exp_buff = np.asarray([obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes])
-                                if experience.shape[0] == 0:
-                                    experience = exp_buff
+                                obses_t_temp, actions_temp, rewards_temp, obses_tp1_temp, dones_temp = self.shared_stuff['indiv_replay_buffers'][buffer_idx].sample(sample_size)
+                                weights_temp, batch_idxes = np.ones_like(rewards_temp), None
+                                
+                                # import pdb; pdb.set_trace()
+                                if obses_t.shape[0] == 0:
+                                    obses_t = obses_t_temp
+                                    actions = actions_temp
+                                    rewards = rewards_temp
+                                    obses_tp1 = obses_tp1_temp
+                                    dones = dones_temp
+                                    weights = weights_temp
                                 else:
-                                    experience = np.concatenate((experience, exp_buff), axis=1)
-                            assert experience.shape[1] == self.batch_size, "error: number of multitask model experiences != multitask model batch size"
+                                    obses_t = np.concatenate((obses_t, obses_t_temp), axis=0)
+                                    actions = np.concatenate((actions, actions_temp), axis=0)
+                                    rewards = np.concatenate((rewards, rewards_temp), axis=0)
+                                    obses_tp1 = np.concatenate((obses_tp1, obses_tp1_temp), axis=0)
+                                    dones = np.concatenate((dones, dones_temp), axis=0)
+                                    weights = np.concatenate((weights, weights_temp), axis=0)
+
+                                # exp_buff = np.asarray([obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes])
+                                # if experience.shape[0] == 0:
+                                #     experience = exp_buff
+                                # else:
+                                #     experience = np.concatenate((experience, exp_buff), axis=1)
+                            
+                            self.shared_stuff['multi_allow'].clear()
+                            self.shared_stuff['indiv_allow'].set()
+                            # import pdb; pdb.set_trace()
+                            assert obses_t.shape[0] == self.batch_size, "error: number of multitask model experiences != multitask model batch size"
                             # since we sorted by replay buffer index, randomize the order of experiences
-                            randomized_idxes = np.random.choice(experience.shape[1], size=experience.shape[1], replace=False)
-                            experience = experience[:, randomized_idxes]
-                            obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes = np.split(experience, experience.shape[0])
+                            randomized_idxes = np.random.choice(self.batch_size, size=self.batch_size, replace=False)
+                            obses_t = obses_t[randomized_idxes]
+                            actions = actions[randomized_idxes]
+                            rewards = rewards[randomized_idxes]
+                            obses_tp1 = obses_tp1[randomized_idxes]
+                            dones = dones[randomized_idxes]
+                            weights = weights[randomized_idxes]
+                            # obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes = np.split(experience, experience.shape[0])
 
 
                         if writer is not None:
@@ -373,7 +430,7 @@ class DQN(OffPolicyRLModel):
                         # Update target network periodically.
                         self.update_target(sess=self.sess)
 
-                if self.num_timesteps % 100 == 0:
+                if (1 + self.num_timesteps) % 1000 == 0:
                     if self.model_type == 'i':
                         if len(episode_rewards[-101:-1]) == 0:
                             mean_100ep_reward = -np.inf
@@ -382,16 +439,17 @@ class DQN(OffPolicyRLModel):
                             mean_100ep_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
                             std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)
                         self.indiv_best_mean_100eq_reward = max(self.indiv_best_mean_100eq_reward, mean_100ep_reward)
+                        print("indiv agent {} has avg reward {}".format(self.model_num, mean_100ep_reward))
                     elif self.model_type =='m':
                         for indiv_task_num in range(len(self.shared_stuff['indiv_replay_buffers'])):
                             # envs in shared_stuff['unwrapped_indiv_envs'] are unwrapped, so wrap before evaluating policy
                             eval_env = VecFrameStack(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num], n_stack=4)
-                            print("shared env {} is {}".format(indiv_task_num, eval_env))
                             # calling a function inside of a method by passing in self feels like bad practice
-                            episode_rewards, _ = evaluate_policy(self, eval_env, n_eval_episodes=10, return_episode_rewards=False)
-                            print("multi agent {} has rewards {} on task {}".format(self.model_num, episode_rewards, indiv_task_num))
-                            mean_100ep_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
-                            std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)
+                            # episode_rewards, _ = evaluate_policy(self, eval_env, n_eval_episodes=10, return_episode_rewards=True)
+                            # mean_100ep_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
+                            # std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)
+                            # print("multi agent {} has avg reward {} on task {}".format(self.model_num, mean_100ep_reward, indiv_task_num))
+                            print("multi_agent {}".format(self.model_num))
                     
                     
 

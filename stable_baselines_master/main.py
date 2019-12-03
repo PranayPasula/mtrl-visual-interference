@@ -1,6 +1,6 @@
 import os
 import time
-from multiprocessing import Manager, Process
+import threading
 
 import gym
 import numpy as np
@@ -32,86 +32,41 @@ if __name__ == '__main__':
             print('training at timestep {}...'.format(n_steps))
         n_steps += 1
 
-    n_indiv = 2
+    n_indiv = 1
     n_multi = 1
 
     env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_indiv)]
     multi_env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_multi)]
 
-    # # initialize replay buffer array for future storage and access by models
-    manager = Manager()
-    shared_stuff = manager.dict(unwrapped_indiv_envs=manager.list([None for i in range(n_indiv)]),
-                                indiv_replay_buffers=manager.list([None for i in range(n_indiv)]),
-                                indiv_allow=None,
-                                multi_allow=None,
-                                indiv_buffer_dones=None,
-                                multi_buffer_dones=None)
+    shared_stuff = dict(indiv_replay_buffers=[None for i in range(n_indiv)],
+                        unwrapped_indiv_envs=[],
+                        indiv_allow = threading.Event(),
+                        multi_allow = threading.Event(),
+                        learning_starts_ev = threading.Event())
+    shared_stuff['indiv_allow'].set()
 
     indiv_envs = []
     multi_envs = []
 
     for env_name in env_names:
-        env = make_atari_env(env_name, num_env=1, seed=0) # num_env might need to be 1 for WSL ubuntu. will throw multiprocessing error otherwise
-        # unwrapped_indiv_envs.append(env) # must be before VecFrameStack bc can't pickle VecFrameStack object
+        env = make_atari_env(env_name, num_env=1, seed=0) # num_env might need to be 1 for WSL ubuntu. will throw multithreading error otherwise
+        shared_stuff['unwrapped_indiv_envs'].append(env)
         env = VecFrameStack(env, n_stack=4)
         indiv_envs.append(env)
+    shared_stuff['indiv_envs'] = indiv_envs
 
     for env_name in multi_env_names:
         env = make_atari_env(env_name, num_env=1, seed=0)
         env = VecFrameStack(env, n_stack=4)
         multi_envs.append(env)
-
-    """
-        Events for synchronizing access to replay buffers.
-
-        Access requirements are
-            for individual task DQNs: indiv_allow is T and multi_buffer_dones are all T
-            for multitask DQNs:       multi_allow is T and indiv_buffer_dones are all T
-
-        Initializations are
-            indiv_allow = T
-            multi_allow = F
-            indiv_buffer_dones = T
-            multi_buffer_dones = T,
-        and are set so that individual task DQNs always access the buffers first.
-    """
-    indiv_allow = manager.Event()
-    indiv_allow.set()
-    multi_allow = manager.Event()
-    indiv_buffer_dones = manager.list()
-    multi_buffer_dones = manager.list()
-    for i in range(n_indiv):
-        indiv_buffer_done = manager.Event()
-        indiv_buffer_done.set()
-        indiv_buffer_dones.append(indiv_buffer_done)
-    for i in range(n_multi):
-        multi_buffer_done = manager.Event()
-        multi_buffer_done.set()
-        multi_buffer_dones.append(multi_buffer_done)
-    import pdb; pdb.set_trace()
-
-    # buffer_sync_events = {'indiv_allow': []
-    #                       }    
-    # indiv_allow = manager.Event()
-    # indiv_allow.set()
-    # multi_allow = manager.Event()
-    # indiv_buffer_dones = manager.list([manager.Event() for i in range(n_indiv)])
-    # multi_buffer_dones = manager.list([manager.Event() for i in range(n_multi)])
-    # import pdb; pdb.set_trace()
-    # for i in range(n_indiv):
-    #     indiv_buffer_dones[i].set()
-    # for i in range(n_multi):
-    #     multi_buffer_dones[i].set()
-    # shared_stuff['indiv_allow'] = indiv_allow
-    # shared_stuff['multi_allow'] = multi_allow
-    # shared_stuff['indiv_buffer_dones'] = indiv_buffer_dones
-    # shared_stuff['multi_buffer_dones'] = multi_buffer_dones
+    shared_stuff['multi_envs'] = multi_envs
 
     indiv_models = []
     multi_models = []
 
+
     def create_model_then_learn(shared_stuff, model_type, model_num, policy_type, env, 
-                            learning_starts=100, prioritized_replay=False, batch_size=32, verbose=0):
+                            learning_starts=200, prioritized_replay=False, batch_size=32, verbose=0):
         global logdirs
         assert model_type == 'i' or 'm', "invalid model type"
         if model_type == 'm':
@@ -132,7 +87,7 @@ if __name__ == '__main__':
         print("{} task DQN {} created".format(model_type_str, model_num))
         print("{} task DQN {} begins learning...".format(model_type_str, model_num))
 
-        model.learn(total_timesteps=1000, callback=callback, tb_log_name="DQN_{}_{}".format(model_type, model_num))
+        model.learn(total_timesteps=3000, callback=callback, tb_log_name="DQN_{}_{}".format(model_type, model_num))
 
         print("{} task DQN {} done learning!".format(model_type_str, model_num))
 
@@ -141,6 +96,7 @@ if __name__ == '__main__':
             indiv_models.append(model)
         else:
             multi_models.append(model)
+
 
     # create directories to log and set up loggers
     data_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
@@ -162,49 +118,49 @@ if __name__ == '__main__':
             if not os.path.exists(logdir):
                 os.makedirs(logdir)
 
-    indiv_processes = []
-    multi_processes = [] 
+    indiv_threads = []
+    multi_threads = [] 
 
     args = {'learning_starts': 100,
             'prioritized_replay': False,
             'batch_size': 32,
             'verbose': 1}
 
-    # spawn indiv task model processes
+    # spawn indiv task model threads
     for indiv_num in range(n_indiv):
-        p = Process(target=create_model_then_learn, 
+        t = threading.Thread(target=create_model_then_learn, 
                         args=(shared_stuff, 'i', 
                             indiv_num, 'CnnPolicy', indiv_envs[indiv_num]), kwargs=args)
-        print('indiv process made')
-        indiv_processes.append(p)
+        print('indiv thread made')
+        indiv_threads.append(t)
 
-    # spawn multitask model processes
+    # spawn multitask model threads
     for multi_num in range(n_multi):
-        p = Process(target=create_model_then_learn,
+        t = threading.Thread(target=create_model_then_learn,
                         args=(shared_stuff, 'm',
                             multi_num, 'CnnPolicy', multi_envs[multi_num]), kwargs=args)
-        print('mt process made')
-        multi_processes.append(p)
+        print('mt thread made')
+        multi_threads.append(t)
 
-    # start indiv task model processes
-    for indiv_process in indiv_processes:
+    # start indiv task model threads
+    for indiv_thread in indiv_threads:
         print('indiv start')
-        indiv_process.start()
+        indiv_thread.start()
         time.sleep(1) 
 
     time.sleep(5)
 
-    # start multitask model processes
-    for multi_process in multi_processes:
+    # start multitask model threads
+    for multi_thread in multi_threads:
         print('mt start')
-        multi_process.start()
+        multi_thread.start()
         time.sleep(1)
 
-    for indiv_process in indiv_processes:
-        indiv_process.join()
+    for indiv_thread in indiv_threads:
+        indiv_thread.join()
 
-    for multi_process in multi_processes:
-        multi_process.join()
+    for multi_thread in multi_threads:
+        multi_thread.join()
 
 
     # DQN('CnnPolicy', env, learning_starts=5000, prioritized_replay=True, verbose=1)
