@@ -104,8 +104,8 @@ def make_atari_env(env_id, num_env, seed, wrapper_kwargs=None,
     set_global_seeds(seed)
 
     # When using one environment, no need to start subprocesses
-    if num_env == 1 or not use_subprocess:
-        return DummyVecEnv([make_env(i + start_index) for i in range(num_env)])
+    if num_env == 1:
+        return DummyVecEnv([make_env(0)])
 
     return SubprocVecEnv([make_env(i + start_index) for i in range(num_env)],
                          start_method=start_method)

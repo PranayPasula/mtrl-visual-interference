@@ -8,11 +8,6 @@ import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
-# from stable_baselines_master.stable_baselines.common.cmd_util import make_atari_env
-# from stable_baselines_master.stable_baselines.common.vec_env import VecFrameStack
-# from stable_baselines_master.stable_baselines.deepq.dqn import DQN
-# from stable_baselines_master.stable_baselines.common.evaluation import evaluate_policy
-
 from stable_baselines.common.evaluation import evaluate_policy
 from stable_baselines.common.cmd_util import make_atari_env
 from stable_baselines.common.vec_env import VecFrameStack
@@ -20,6 +15,9 @@ from stable_baselines.deepq.dqn import DQN
 
 import mysettings
 from mylogger import Logger
+
+import vec_monitor
+
 
 if __name__ == '__main__':
 
@@ -32,8 +30,8 @@ if __name__ == '__main__':
             print('training at timestep {}...'.format(n_steps))
         n_steps += 1
 
-    n_indiv = 2
-    n_multi = 2
+    n_indiv = 1
+    n_multi = 1
 
     env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_indiv)]
     multi_env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_multi)]
@@ -60,14 +58,14 @@ if __name__ == '__main__':
     indiv_envs = []
     multi_envs = []
 
-    for env_name in env_names:
+    for i, env_name in enumerate(env_names):
         env = make_atari_env(env_name, num_env=1, seed=0) # num_env might need to be 1 for WSL ubuntu. will throw multithreading error otherwise
         shared_stuff['unwrapped_indiv_envs'].append(env)
         env = VecFrameStack(env, n_stack=4)
         indiv_envs.append(env)
     shared_stuff['indiv_envs'] = indiv_envs
 
-    for env_name in multi_env_names:
+    for i, env_name in enumerate(multi_env_names):
         env = make_atari_env(env_name, num_env=1, seed=0)
         env = VecFrameStack(env, n_stack=4)
         multi_envs.append(env)
@@ -137,7 +135,7 @@ if __name__ == '__main__':
     args = {'learning_starts': 100,
             'prioritized_replay': False,
             'batch_size': 32,
-            'verbose': 1}
+            'verbose': 2}
 
     # spawn indiv task model threads
     for indiv_num in range(n_indiv):

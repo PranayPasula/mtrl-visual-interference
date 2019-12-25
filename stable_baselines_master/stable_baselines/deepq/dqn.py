@@ -1,9 +1,11 @@
 from functools import partial
+from collections import OrderedDict
 
 import time
 import tensorflow as tf
 import numpy as np
 import gym
+
 
 from stable_baselines import logger, deepq
 from stable_baselines.common import tf_util, OffPolicyRLModel, SetVerbosity, TensorboardWriter
@@ -15,6 +17,17 @@ from stable_baselines.deepq.policies import DQNPolicy
 from stable_baselines.a2c.utils import total_episode_reward_logger
 
 import mysettings # for global replay buffers
+
+def transform_obs(obs, model_num):
+
+    if model_num == 0:
+        return obs
+    elif model_num == 1:
+        return 255 - obs
+    elif model_num == 2:
+        return np.floor(np.sqrt(obs) * np.sqrt(255.))
+    elif model_num == 3:
+        return np.floor( (obs ** 2.) / 255. )
 
 
 class DQN(OffPolicyRLModel):
@@ -103,7 +116,9 @@ class DQN(OffPolicyRLModel):
         # MYEDIT hacky inits
         self.shared_stuff = shared_stuff
         self.indiv_best_mean_100eq_reward = -np.inf
+        self.indiv_best_mean_100eq_reward_actual = -np.inf
         self.multi_best_mean_100eq_rewards = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
+        self.multi_best_mean_100eq_rewards_actual = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
         self.indiv_logger = None
         self.multi_loggers = [None for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
 
@@ -192,8 +207,11 @@ class DQN(OffPolicyRLModel):
                                                 final_p=self.exploration_final_eps)
 
             episode_rewards = [0.0]
+            episode_rewards_actual = []
             episode_successes = []
             obs = self.env.reset()
+            # Induce visual dissimilarity
+            obs = transform_obs(obs, self.model_num)
             reset = True
             self.episode_reward = np.zeros((1,))
             start_time = time.time()
@@ -233,6 +251,17 @@ class DQN(OffPolicyRLModel):
                     env_action = action
                     reset = False
                     new_obs, rew, done, info = self.env.step(env_action)
+                    # Store episode reward once episode ends
+                    if info is not None:
+                        episode_info = info.get('episode')
+                        # if self.num_timesteps > 150 and done:
+                            # import pdb; pdb.set_trace()
+                        if episode_info is not None:
+                            print(episode_info)
+                            # import pdb; pdb.set_trace()
+                            episode_rewards_actual.append(episode_info['r'])
+                    # Induce visual dissimilarity
+                    new_obs = transform_obs(new_obs, self.model_num)
 
                     # Update self.shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
                     if self.num_timesteps % 100 == 0:
@@ -253,6 +282,7 @@ class DQN(OffPolicyRLModel):
                             self.shared_stuff['learning_starts_ev'].set()
                     obs = new_obs
 
+                    # TODO Change inside this block to capture actual episode rewards
                     if writer is not None:
                         ep_rew = np.array([rew]).reshape((1, -1))
                         ep_done = np.array([done]).reshape((1, -1))
@@ -267,10 +297,11 @@ class DQN(OffPolicyRLModel):
                         #     episode_successes.append(float(maybe_is_success))
                         if not isinstance(self.env, VecEnv):
                             obs = self.env.reset()
+                            # Induce visual dissimilarity
+                            obs = transform_obs(obs, self.model_num)
                         episode_rewards.append(0.0)
                         reset = True
                 
-                # begin MYEDIT
                 # obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights, batch_idxes = [False for i in range(8)]
                 if self.model_type == 'i': # MYEDIT different replay buffer sampling for indiv vs multi models
                     # Do not train if the warmup phase is not over
@@ -442,14 +473,15 @@ class DQN(OffPolicyRLModel):
                 if (1 + self.num_timesteps) % 100 == 0:
                     print(str(time.time() - start_time) + " sec")
                     if self.model_type == 'i':
-                        if len(episode_rewards[-101:-1]) == 0:
-                            mean_100ep_reward = -np.inf
-                            std_100ep_reward = 0
+                        print(len(episode_rewards_actual))
+                        if len(episode_rewards_actual) == 0:
+                            mean_100ep_reward_actual = -np.inf
+                            # std_100ep_reward = 0
                         else:
-                            mean_100ep_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
-                            std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)
-                        self.indiv_best_mean_100eq_reward = max(self.indiv_best_mean_100eq_reward, mean_100ep_reward)
-                        print("indiv agent {} has avg reward {}".format(self.model_num, mean_100ep_reward))
+                            mean_100ep_reward_actual = round(float(np.mean(episode_rewards_actual[-100:])), 1)
+                            # std_100ep_reward_actual = round(float(np.std(episode_rewards_actual[-101:-1])), 1)
+                        self.indiv_best_mean_100eq_reward_actual = max(self.indiv_best_mean_100eq_reward_actual, mean_100ep_reward_actual)
+                        print("indiv agent {} has avg reward {}".format(self.model_num, mean_100ep_reward_actual))
                     elif self.model_type =='m':
                         print("multi_agent {}".format(self.model_num))
                         for indiv_task_num in range(len(self.shared_stuff['indiv_replay_buffers'])):
@@ -458,7 +490,7 @@ class DQN(OffPolicyRLModel):
                             eval_env = VecFrameStack(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num], n_stack=4)
 
                             # calling a function inside of a method by passing in self feels like bad practice
-                            # episode_rewards, _ = evaluate_policy(self, eval_env, n_eval_episodes=10, return_episode_rewards=True)
+                            # episode_rewards, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=10, return_episode_rewards=True)
 
                             # mean_100ep_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
                             # std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)

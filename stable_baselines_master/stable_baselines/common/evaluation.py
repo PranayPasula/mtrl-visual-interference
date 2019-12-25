@@ -3,7 +3,20 @@ import numpy as np
 from stable_baselines.common.vec_env import VecEnv
 
 
-def evaluate_policy(model, env, n_eval_episodes=10, deterministic=True,
+
+def transform_obs(obs, model_num):
+
+    if model_num == 0:
+        return obs
+    elif model_num == 1:
+        return 255 - obs
+    elif model_num == 2:
+        return np.floor(np.sqrt(obs) * np.sqrt(255.))
+    elif model_num == 3:
+        return np.floor( (obs ** 2.) / 255. )
+
+
+def evaluate_policy(model, indiv_task_num, env, n_eval_episodes=10, deterministic=True,
                     render=False, callback=None, reward_threshold=None,
                     return_episode_rewards=False):
     """
@@ -31,11 +44,15 @@ def evaluate_policy(model, env, n_eval_episodes=10, deterministic=True,
     episode_rewards, n_steps = [], 0
     for _ in range(n_eval_episodes):
         obs = env.reset()
+        # Apply visual transformation that matches that of corresponding indiv task
+        obs = transform_obs(obs, indiv_task_num)
         done, state = False, None
         episode_reward = 0.0
         while not done:
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, _info = env.step(action)
+            # Apply visual transformation that matches that of corresponding indiv task
+            obs = transform_obs(obs, indiv_task_num)
             episode_reward += reward
             if callback is not None:
                 callback(locals(), globals())
