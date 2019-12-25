@@ -43,7 +43,7 @@ if __name__ == '__main__':
                         indiv_allow = threading.Event(),
                         multi_allow = threading.Event(),
                         learning_starts_ev = threading.Event())
-    shared_stuff['indiv_allow'].set()
+    shared_stuff['indiv_allow'].set() 
 
     indiv_envs = []
     multi_envs = []

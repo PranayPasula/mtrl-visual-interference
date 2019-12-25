@@ -1,7 +1,7 @@
 {
 	"folders": [
 		{
-			"uri": "vscode-remote://wsl+ubuntu/mnt/c/Users/Pranay/desktop/dtf/f19/research/rl-visual-interference-openai"
+			"uri": "vscode-remote://wsl+ubuntu/mnt/c/Users/Pranay/desktop/dtf/f19/research/rl-visual-interference-openai/stable_baselines_master"
 		}
 	],
 	"remoteAuthority": "wsl+Ubuntu",
