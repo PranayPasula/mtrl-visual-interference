@@ -25,7 +25,7 @@ def nature_cnn(scaled_images, **kwargs):
     layer_2 = activ(conv(layer_1, 'c2', n_filters=64, filter_size=4, stride=2, init_scale=np.sqrt(2), **kwargs))
     layer_3 = activ(conv(layer_2, 'c3', n_filters=64, filter_size=3, stride=1, init_scale=np.sqrt(2), **kwargs))
     layer_3 = conv_to_fc(layer_3)
-    return activ(linear(layer_3, 'fc1', n_hidden=512, init_scale=np.sqrt(2)))
+    return activ(linear(layer_3, 'fc1', n_hidden=256, init_scale=np.sqrt(2))) # myedit changed from 512 to 256
 
 
 def mlp_extractor(flat_observations, net_arch, act_fun):

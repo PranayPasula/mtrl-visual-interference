@@ -32,17 +32,29 @@ if __name__ == '__main__':
             print('training at timestep {}...'.format(n_steps))
         n_steps += 1
 
-    n_indiv = 1
-    n_multi = 1
+    n_indiv = 2
+    n_multi = 2
 
     env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_indiv)]
     multi_env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_multi)]
 
+    # Share replay buffers, envs, Events that indicate whether a task is done, 
+    # an Event that indicates whether indiv task agents can proceed,
+    # an Event that indicates whether multitask agents can proceed,
+    # and an Event that indicates that all indiv task agents have begun learning.
     shared_stuff = dict(indiv_replay_buffers=[None for i in range(n_indiv)],
                         unwrapped_indiv_envs=[],
+                        indiv_agent_dones = [threading.Event() for i in range(n_indiv)],
+                        multi_agent_dones = [threading.Event() for i in range(n_multi)],
                         indiv_allow = threading.Event(),
                         multi_allow = threading.Event(),
                         learning_starts_ev = threading.Event())
+
+    # Set Events so that indiv and multitask agents are properly synchronized
+    for indiv_agent_done in shared_stuff['indiv_agent_dones']:
+        indiv_agent_done.set()
+    for multi_agent_done in shared_stuff['multi_agent_dones']:
+        multi_agent_done.set()
     shared_stuff['indiv_allow'].set() 
 
     indiv_envs = []
@@ -64,7 +76,8 @@ if __name__ == '__main__':
     indiv_models = []
     multi_models = []
 
-
+    # init model and then run training process.
+    # thread function
     def create_model_then_learn(shared_stuff, model_type, model_num, policy_type, env, 
                             learning_starts=200, prioritized_replay=False, batch_size=32, verbose=0):
         global logdirs
