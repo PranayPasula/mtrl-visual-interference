@@ -1,16 +1,19 @@
 from functools import partial
 from collections import OrderedDict
 
+import sys
 import time
 import tensorflow as tf
 import numpy as np
 import gym
+import copy
 
 
 from stable_baselines import logger, deepq
 from stable_baselines.common import tf_util, OffPolicyRLModel, SetVerbosity, TensorboardWriter
-from stable_baselines.common.evaluation import evaluate_policy # MYEDIT
+# from stable_baselines.common.evaluation import evaluate_policy # MYEDIT
 from stable_baselines.common.vec_env import VecEnv, VecFrameStack
+
 from stable_baselines.common.schedules import LinearSchedule
 from stable_baselines.deepq.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
 from stable_baselines.deepq.policies import DQNPolicy
@@ -115,10 +118,14 @@ class DQN(OffPolicyRLModel):
 
         # MYEDIT hacky inits
         self.shared_stuff = shared_stuff
-        self.indiv_best_mean_100eq_reward = -np.inf
-        self.indiv_best_mean_100eq_reward_actual = -np.inf
-        self.multi_best_mean_100eq_rewards = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
-        self.multi_best_mean_100eq_rewards_actual = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
+        self.indiv_mean_10ep_reward = -np.inf
+        self.indiv_mean_10ep_reward_actual = -np.inf
+        self.multi_mean_10ep_rewards = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
+        self.multi_mean_10ep_rewards_actual = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
+        self.indiv_best_mean_10ep_reward = -np.inf
+        self.indiv_best_mean_10ep_reward_actual = -np.inf
+        self.multi_best_mean_10ep_rewards = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
+        self.multi_best_mean_10ep_rewards_actual = [-np.inf for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
         self.indiv_logger = None
         self.multi_loggers = [None for i in range(len(self.shared_stuff['indiv_replay_buffers']))]
 
@@ -209,6 +216,7 @@ class DQN(OffPolicyRLModel):
             episode_rewards = [0.0]
             episode_rewards_actual = []
             episode_successes = []
+            print(type(self.env))
             obs = self.env.reset()
             # Induce visual dissimilarity
             obs = transform_obs(obs, self.model_num)
@@ -263,31 +271,28 @@ class DQN(OffPolicyRLModel):
                     # Induce visual dissimilarity
                     new_obs = transform_obs(new_obs, self.model_num)
 
-                    # Update self.shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
-                    if self.num_timesteps % 100 == 0:
-                        self.shared_stuff['unwrapped_indiv_envs'][self.model_num] = self.env.unwrapped
-      
-                    # Store transition in the replay buffer. Start main indiv/multitask agent synchronization cycle 
+                    # Start main indiv/multitask agent synchronization cycle 
                     # after all indiv task agents start learning.
                     if self.num_timesteps > self.learning_starts:
                         self.shared_stuff['indiv_allow'].wait()
                         self.shared_stuff['multi_allow'].clear()
                         self.shared_stuff['indiv_agent_dones'][self.model_num].clear()
+
+                    # Update self.shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
+                    if self.num_timesteps % 200 == 0:
+                        self.shared_stuff['unwrapped_indiv_envs'][self.model_num] = copy.deepcopy(self.env.unwrapped)
+      
+                    # Store transition in the replay buffer.
                     self.replay_buffer.add(obs, action, rew, new_obs, float(done))
-                    if self.num_timesteps > self.learning_starts:
-                        self.shared_stuff['indiv_agent_dones'][self.model_num].set()
-                        if all([indiv_task_done.is_set() for indiv_task_done in self.shared_stuff['indiv_agent_dones']]):
-                            self.shared_stuff['indiv_allow'].clear()
-                            self.shared_stuff['multi_allow'].set()
-                            self.shared_stuff['learning_starts_ev'].set()
+
                     obs = new_obs
 
                     # TODO Change inside this block to capture actual episode rewards
-                    if writer is not None:
-                        ep_rew = np.array([rew]).reshape((1, -1))
-                        ep_done = np.array([done]).reshape((1, -1))
-                        self.episode_reward = total_episode_reward_logger(self.episode_reward, ep_rew, ep_done, writer,
-                                                                        self.num_timesteps)
+                    # if writer is not None:
+                    #     ep_rew = np.array([rew]).reshape((1, -1))
+                    #     ep_done = np.array([done]).reshape((1, -1))
+                    #     self.episode_reward = total_episode_reward_logger(self.episode_reward, ep_rew, ep_done, writer,
+                    #                                                     self.num_timesteps)
 
                     episode_rewards[-1] += rew
                     if done:
@@ -296,12 +301,20 @@ class DQN(OffPolicyRLModel):
                         # if maybe_is_success is not None:
                         #     episode_successes.append(float(maybe_is_success))
                         if not isinstance(self.env, VecEnv):
+                            import pdb; pdb.set_trace()
                             obs = self.env.reset()
                             # Induce visual dissimilarity
                             obs = transform_obs(obs, self.model_num)
                         episode_rewards.append(0.0)
                         reset = True
                 
+                    if self.num_timesteps > self.learning_starts:
+                        self.shared_stuff['indiv_agent_dones'][self.model_num].set()
+                        if all([indiv_task_done.is_set() for indiv_task_done in self.shared_stuff['indiv_agent_dones']]):
+                            self.shared_stuff['indiv_allow'].clear()
+                            self.shared_stuff['multi_allow'].set()
+                            self.shared_stuff['learning_starts_ev'].set()
+
                 # obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights, batch_idxes = [False for i in range(8)]
                 if self.model_type == 'i': # MYEDIT different replay buffer sampling for indiv vs multi models
                     # Do not train if the warmup phase is not over
@@ -318,23 +331,23 @@ class DQN(OffPolicyRLModel):
                             obses_t, actions, rewards, obses_tp1, dones = self.replay_buffer.sample(self.batch_size)
                             weights, batch_idxes = np.ones_like(rewards), None
 
-                        # bug with last line: "local variable 'obses_t' referenced before assignment"
-                        if writer is not None:
-                            # run loss backprop with summary, but once every 100 steps save the metadata
-                            # (memory, compute time, ...)
-                            if (1 + self.num_timesteps) % 100 == 0:
-                                run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                                run_metadata = tf.RunMetadata()
-                                summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
-                                                                        dones, weights, sess=self.sess, options=run_options,
-                                                                        run_metadata=run_metadata)
-                                writer.add_run_metadata(run_metadata, 'step%d' % self.num_timesteps)
-                            else:
-                                summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
-                                                                        dones, weights, sess=self.sess)
-                            writer.add_summary(summary, self.num_timesteps)
-                        else:
-                            _, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights,
+                        # # bug with last line: "local variable 'obses_t' referenced before assignment"
+                        # if writer is not None:
+                        #     # run loss backprop with summary, but once every 100 steps save the metadata
+                        #     # (memory, compute time, ...)
+                        #     if (1 + self.num_timesteps) % 100 == 0:
+                        #         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                        #         run_metadata = tf.RunMetadata()
+                        #         summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
+                        #                                                 dones, weights, sess=self.sess, options=run_options,
+                        #                                                 run_metadata=run_metadata)
+                        #         writer.add_run_metadata(run_metadata, 'step%d' % self.num_timesteps)
+                        #     else:
+                        #         summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
+                        #                                                 dones, weights, sess=self.sess)
+                        #     writer.add_summary(summary, self.num_timesteps)
+                        # else:
+                        _, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights,
                                                         sess=self.sess)
 
                     if self.prioritized_replay:
@@ -382,7 +395,7 @@ class DQN(OffPolicyRLModel):
                                     experience = np.concatenate((experience, exp_buff), axis=1)
                             
                             self.shared_stuff['multi_agent_dones'][self.model_num].set()
-                            if all([multi_task_done.is_set for multi_task_done in self.shared_stuff['multi_agent_dones']]):
+                            if all([multi_task_done.is_set() for multi_task_done in self.shared_stuff['multi_agent_dones']]):
                                 self.shared_stuff['multi_allow'].clear()
                                 self.shared_stuff['indiv_allow'].set()
 
@@ -424,7 +437,7 @@ class DQN(OffPolicyRLModel):
                                 #     experience = np.concatenate((experience, exp_buff), axis=1)
 
                             self.shared_stuff['multi_agent_dones'][self.model_num].set()
-                            if all([multi_task_done.is_set for multi_task_done in self.shared_stuff['multi_agent_dones']]):
+                            if all([multi_task_done.is_set() for multi_task_done in self.shared_stuff['multi_agent_dones']]):
                                 self.shared_stuff['multi_allow'].clear()
                                 self.shared_stuff['indiv_allow'].set()
                             
@@ -439,23 +452,23 @@ class DQN(OffPolicyRLModel):
                             weights = weights[randomized_idxes]
                             # obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes = np.split(experience, experience.shape[0])
 
-                        if writer is not None:
-                            # run loss backprop with summary, but once every 100 steps save the metadata
-                            # (memory, compute time, ...)
-                            if (1 + self.num_timesteps) % 100 == 0:
-                                run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                                run_metadata = tf.RunMetadata()
-                                summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
-                                                                    dones, weights, sess=self.sess, options=run_options,
-                                                                    run_metadata=run_metadata)
-                                writer.add_run_metadata(run_metadata, 'step%d' % self.num_timesteps)
-                            else:
-                                summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
-                                                                    dones, weights, sess=self.sess)
-                            writer.add_summary(summary, self.num_timesteps)
-                        else:                            
-                            _, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights,
-                                                            sess=self.sess)
+                        # if writer is not None:
+                        #     # run loss backprop with summary, but once every 100 steps save the metadata
+                        #     # (memory, compute time, ...)
+                        #     if (1 + self.num_timesteps) % 100 == 0:
+                        #         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                        #         run_metadata = tf.RunMetadata()
+                        #         summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
+                        #                                             dones, weights, sess=self.sess, options=run_options,
+                        #                                             run_metadata=run_metadata)
+                        #         writer.add_run_metadata(run_metadata, 'step%d' % self.num_timesteps)
+                        #     else:
+                        #         summary, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1,
+                        #                                             dones, weights, sess=self.sess)
+                        #     writer.add_summary(summary, self.num_timesteps)
+                        # else:                            
+                        _, td_errors = self._train_step(obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights,
+                                                        sess=self.sess)
 
                         if self.prioritized_replay:
                             new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
@@ -470,49 +483,161 @@ class DQN(OffPolicyRLModel):
                         # Update target network periodically.
                         self.update_target(sess=self.sess)
 
-                if (1 + self.num_timesteps) % 100 == 0:
+                # For indiv-task agent, log mean return over last 10 ep.
+                # For multi-task agent, evaluate policy on each task and log mean returns over some # ep.
+                if (self.num_timesteps > self.learning_starts) and (self.num_timesteps) % 200 == 0:
+
                     print(str(time.time() - start_time) + " sec")
+
+                    mean_10ep_reward_actual = 0
                     if self.model_type == 'i':
                         print(len(episode_rewards_actual))
                         if len(episode_rewards_actual) == 0:
-                            mean_100ep_reward_actual = -np.inf
-                            # std_100ep_reward = 0
+                            mean_10ep_reward_actual = -np.inf
                         else:
-                            mean_100ep_reward_actual = round(float(np.mean(episode_rewards_actual[-100:])), 1)
-                            # std_100ep_reward_actual = round(float(np.std(episode_rewards_actual[-101:-1])), 1)
-                        self.indiv_best_mean_100eq_reward_actual = max(self.indiv_best_mean_100eq_reward_actual, mean_100ep_reward_actual)
-                        print("indiv agent {} has avg reward {}".format(self.model_num, mean_100ep_reward_actual))
+                            mean_10ep_reward_actual = round(float(np.mean(episode_rewards_actual[-10:])), 1)
+                        self.indiv_mean_10ep_reward_actual = mean_10ep_reward_actual
+                        self.indiv_best_mean_10ep_reward_actual = max(self.indiv_best_mean_10ep_reward_actual, mean_10ep_reward_actual)
+                        print("indiv agent {} has avg reward {}".format(self.model_num, mean_10ep_reward_actual))
+
                     elif self.model_type =='m':
+                        
+                        self.shared_stuff['learning_starts_ev'].wait()
+
                         print("multi_agent {}".format(self.model_num))
+
+                        self.shared_stuff['multi_allow'].wait()
+                        self.shared_stuff['indiv_allow'].clear()
+                        self.shared_stuff['multi_agent_dones'][self.model_num].clear()
+                        
                         for indiv_task_num in range(len(self.shared_stuff['indiv_replay_buffers'])):
 
                             # envs in shared_stuff['unwrapped_indiv_envs'] are unwrapped, so wrap before evaluating policy
-                            eval_env = VecFrameStack(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num], n_stack=4)
+                            eval_env = VecFrameStack(copy.deepcopy(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num]), n_stack=4)
 
                             # calling a function inside of a method by passing in self feels like bad practice
-                            # episode_rewards, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=10, return_episode_rewards=True)
+                            episode_rewards, episode_rewards_actual, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=20, return_episode_rewards=True)
+                            if len(episode_rewards_actual) > 0:
+                                self.multi_mean_10ep_rewards_actual[indiv_task_num] = round(float(np.mean(episode_rewards_actual)), 1)
+                            else:
+                                self.multi_mean_10ep_rewards_actual[indiv_task_num] = 0
 
-                            # mean_100ep_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
-                            # std_100ep_reward = round(float(np.std(episode_rewards[-101:-1])), 1)
-
-                            # print("multi agent {} has avg reward {} on task {}".format(self.model_num, mean_100ep_reward, indiv_task_num))
+                            print("multi agent {} has avg reward {} on task {}".format(self.model_num, self.multi_mean_10ep_rewards_actual[indiv_task_num], indiv_task_num))
                     
-                    
+                        self.shared_stuff['multi_agent_dones'][self.model_num].set()
+                        if all([multi_task_done.is_set() for multi_task_done in self.shared_stuff['multi_agent_dones']]):
+                            self.shared_stuff['multi_allow'].clear()
+                            self.shared_stuff['indiv_allow'].set()
 
+                    # if self.model_type == 'i':
+                    #     num_episodes = len(episode_rewards_actual)
+                    #     if self.verbose >= 1:
+                    #         logger.record_tabular("steps", self.num_timesteps)
+                    #         logger.record_tabular("episodes", num_episodes)
+                    #         logger.record_tabular("mean 10 ep actual reward", mean_10ep_reward_actual)
+                    #         logger.record_tabular("% time spent exploring",
+                    #                             int(100 * self.exploration.value(self.num_timesteps)))
+                    #         logger.dump_tabular()
+
+                    if self.model_type == 'i':
+                        logs = OrderedDict()
+                        logs["Train_EnvstepsSoFar"] = self.num_timesteps
+                        print("Timestep %d" % (self.num_timesteps,))
+                        if self.indiv_mean_10ep_reward_actual > -1000:
+                            logs["Train_AverageReturn"] = self.indiv_mean_10ep_reward_actual
+                            print("mean reward (10 episodes) %f" % self.indiv_mean_10ep_reward_actual)
+                        if self.indiv_best_mean_10ep_reward_actual > -1000:
+                            logs["Train_BestReturn"] = self.indiv_best_mean_10ep_reward_actual
+                            print("best mean reward %f" % self.indiv_best_mean_10ep_reward_actual)
+                        if start_time is not None:
+                            time_since_start = (time.time() - start_time)
+                            print("running time %f" % time_since_start)
+                            logs["TimeSinceStart"] = time_since_start
+
+                        sys.stdout.flush()
+
+                        for key, value in logs.items():
+                            print('{} : {}'.format(key, value))
+                            self.indiv_logger.log_scalar(value, key, self.num_timesteps)
+                            print('Done logging...\n\n')
+
+                        self.indiv_logger.flush()
+                    else:
+                        for indiv_task_num in range(len(self.shared_stuff['indiv_replay_buffers'])):
+                            logs = OrderedDict()
+                            logs["Train_EnvstepsSoFar"] = self.num_timesteps
+                            print("Timestep %d" % (self.num_timesteps,))
+                            if self.multi_mean_10ep_rewards_actual[indiv_task_num] > -1000:
+                                logs["Train_AverageReturn"] = self.multi_mean_10ep_rewards_actual[indiv_task_num]
+                                print("mean reward (10 episodes) %f" % self.multi_mean_10ep_rewards_actual[indiv_task_num])
+                            if self.multi_best_mean_10ep_rewards_actual[indiv_task_num] > -1000:
+                                logs["Train_BestReturn"] = self.multi_best_mean_10ep_rewards_actual[indiv_task_num]
+                                print("best mean reward %f" % self.multi_best_mean_10ep_rewards_actual[indiv_task_num])
+                            if start_time is not None:
+                                time_since_start = (time.time() - start_time)
+                                print("running time %f" % time_since_start)
+                                logs["TimeSinceStart"] = time_since_start
+
+                            sys.stdout.flush()
+
+                            for key, value in logs.items():
+                                print('{} : {}'.format(key, value))
+                                self.multi_loggers[indiv_task_num].log_scalar(value, key, self.num_timesteps)
+                                print('Done logging...\n\n')
+
+                            self.multi_loggers[indiv_task_num].flush()
+                    
                 # num_episodes = len(episode_rewards)
                 # if self.verbose >= 1 and done and log_interval is not None and len(episode_rewards) % log_interval == 0:
                 #     logger.record_tabular("steps", self.num_timesteps)
                 #     logger.record_tabular("episodes", num_episodes)
                 #     # MYEDIT no need to track successes
                 #     # if len(episode_successes) > 0:
-                #     #     logger.logkv("success rate", np.mean(episode_successes[-100:]))
-                #     logger.record_tabular("mean 100 episode reward", mean_100ep_reward)
+                #     #     logger.logkv("success rate", np.mean(episode_successes[-10:]))
+                #     logger.record_tabular("mean 10 episode reward", mean_10ep_reward)
                 #     logger.record_tabular("% time spent exploring",
                 #                         int(100 * self.exploration.value(self.num_timesteps)))
                 #     logger.dump_tabular()
 
-
+                # num_episodes = len(episode_rewards_actual)
+                # if self.model_type == 'i':
+                #     if self.verbose >= 1 and done and log_interval is not None and len(episode_rewards_actual) % log_interval == 0:
+                #         logger.record_tabular("steps", self.num_timesteps)
+                #         logger.record_tabular("episodes", num_episodes)
+                #         logger.record_tabular("mean 10 ep actual reward", mean_10ep_reward_actual)
+                #         logger.record_tabular("% time spent exploring",
+                #                             int(100 * self.exploration.value(self.num_timesteps)))
+                #         logger.dump_tabular()
+               
+               
                 self.num_timesteps += 1
+
+                if not self.shared_stuff['learning_starts_ev'].is_set():
+                    
+                    # if self.model_type == 'i':
+                    #     self.shared_stuff['indiv_timesteps'][self.model_num] = self.num_timesteps
+                    # else:
+                    #     self.shared_stuff['multi_timesteps'][self.model_num] = self.num_timesteps
+
+                    # if self.model_type == 'i':
+                    #     if min(self.shared_stuff['indiv_timesteps']) < max(self.shared_stuff['multi_timesteps']):
+                    #         self.shared_stuff['timestep_comparator'].clear()
+                    #     else:
+                    #         self.shared_stuff['timestep_comparator'].set()
+                    # else:
+                    #     self.shared_stuff['timestep_comparator'].wait()
+
+                    self.shared_stuff['all_timesteps_same'].wait()
+                    diff_flag = 0
+                    for indiv_timestep in self.shared_stuff['indiv_timesteps']:
+                        for multi_timestep in self.shared_stuff['multi_timesteps']:
+                            if indiv_timestep != multi_timestep:
+                                diff_flag = 1
+                    if diff_flag == 0:
+                        self.shared_stuff['all_timesteps_same'].set()
+                    else:
+                        self.shared_stuff['all_timesteps_same'].clear()
+                        self.shared_stuff['all_timesteps_same'].wait()
 
         return self
 
@@ -589,3 +714,61 @@ class DQN(OffPolicyRLModel):
         params_to_save = self.get_parameters()
 
         self._save_to_file(save_path, data=data, params=params_to_save, cloudpickle=cloudpickle)
+
+def evaluate_policy(model, indiv_task_num, env, n_eval_episodes=10, deterministic=True,
+                    render=False, callback=None, reward_threshold=None,
+                    return_episode_rewards=False):
+        """
+        Runs policy for `n_eval_episodes` episodes and returns average reward.
+        This is made to work only with one env.
+
+        :param model: (BaseRLModel) The RL agent you want to evaluate.
+        :param env: (gym.Env or VecEnv) The gym environment. In the case of a `VecEnv`
+            this must contain only one environment.
+        :param n_eval_episodes: (int) Number of episode to evaluate the agent
+        :param deterministic: (bool) Whether to use deterministic or stochastic actions
+        :param render: (bool) Whether to render the environement or not
+        :param callback: (callable) callback function to do additional checks,
+            called after each step.
+        :param reward_threshold: (float) Minimum expected reward per episode,
+            this will raise an error if the performance is not met
+        :param return_episode_rewards: (bool) If True, a list of reward per episode
+            will be returned instead of the mean.
+        :return: (float, int) Mean reward per episode, total number of steps
+            returns ([float], int) when `return_episode_rewards` is True
+        """
+        if isinstance(env, VecEnv):
+            assert env.num_envs == 1, "You must pass only one environment when using this function"
+
+        episode_rewards, n_steps = [], 0
+        episode_rewards_actual = []
+        for _ in range(n_eval_episodes):
+            obs = env.reset()
+            # Apply visual transformation that matches that of corresponding indiv task
+            obs = transform_obs(obs, indiv_task_num)
+            done, state = False, None
+            episode_reward = 0.0
+            while not done:
+                action, state = model.predict(obs, state=state, deterministic=deterministic)
+                obs, reward, done, _info = env.step(action)
+                # Apply visual transformation that matches that of corresponding indiv task
+                obs = transform_obs(obs, indiv_task_num)
+                episode_reward += reward
+                if callback is not None:
+                    callback(locals(), globals())
+                n_steps += 1
+                if render:
+                    env.render()
+            # Store clipped episode rewards and actual episode rewards
+            episode_rewards.append(episode_reward)
+            if _info[0].get('episode') is not None:
+                episode_reward_actual = _info[0]['episode']['r']
+                episode_rewards_actual.append(episode_reward_actual)
+        mean_reward = np.mean(episode_rewards)
+        mean_reward_actual = np.mean(episode_rewards_actual)
+        if reward_threshold is not None:
+            assert mean_reward > reward_threshold, 'Mean reward below threshold: '\
+                                            '{:.2f} < {:.2f}'.format(mean_reward, reward_threshold)
+        if return_episode_rewards:
+            return episode_rewards, episode_rewards_actual, n_steps
+        return mean_reward, mean_reward_actual, n_steps

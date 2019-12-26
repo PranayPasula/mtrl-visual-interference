@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import copy
 
 import gym
 import numpy as np
@@ -30,7 +31,7 @@ if __name__ == '__main__':
             print('training at timestep {}...'.format(n_steps))
         n_steps += 1
 
-    n_indiv = 1
+    n_indiv = 4
     n_multi = 1
 
     env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_indiv)]
@@ -41,26 +42,31 @@ if __name__ == '__main__':
     # an Event that indicates whether multitask agents can proceed,
     # and an Event that indicates that all indiv task agents have begun learning.
     shared_stuff = dict(indiv_replay_buffers=[None for i in range(n_indiv)],
+                        indiv_timesteps=[0 for i in range(n_indiv)],
+                        multi_timesteps=[0 for i in range(n_multi)],
                         unwrapped_indiv_envs=[],
                         indiv_agent_dones = [threading.Event() for i in range(n_indiv)],
                         multi_agent_dones = [threading.Event() for i in range(n_multi)],
+                        all_timesteps_same= threading.Event(),
                         indiv_allow = threading.Event(),
                         multi_allow = threading.Event(),
                         learning_starts_ev = threading.Event())
 
     # Set Events so that indiv and multitask agents are properly synchronized
-    for indiv_agent_done in shared_stuff['indiv_agent_dones']:
-        indiv_agent_done.set()
-    for multi_agent_done in shared_stuff['multi_agent_dones']:
-        multi_agent_done.set()
+    for i in range(n_indiv):
+        shared_stuff['indiv_agent_dones'][i].set()
+    for i in range(n_multi):
+        shared_stuff['multi_agent_dones'][i].set()
+    shared_stuff['all_timesteps_same'].set()
     shared_stuff['indiv_allow'].set() 
+
 
     indiv_envs = []
     multi_envs = []
 
     for i, env_name in enumerate(env_names):
         env = make_atari_env(env_name, num_env=1, seed=0) # num_env might need to be 1 for WSL ubuntu. will throw multithreading error otherwise
-        shared_stuff['unwrapped_indiv_envs'].append(env)
+        shared_stuff['unwrapped_indiv_envs'].append(copy.deepcopy(env))
         env = VecFrameStack(env, n_stack=4)
         indiv_envs.append(env)
     shared_stuff['indiv_envs'] = indiv_envs
@@ -82,7 +88,7 @@ if __name__ == '__main__':
         assert model_type == 'i' or 'm', "invalid model type"
         if model_type == 'm':
             batch_size = n_indiv * batch_size
-            
+        print(type(env))
         model = DQN(policy_type, env, learning_starts=learning_starts, prioritized_replay=prioritized_replay, 
                     batch_size=batch_size, verbose=verbose, shared_stuff=shared_stuff)
         model.model_type = model_type

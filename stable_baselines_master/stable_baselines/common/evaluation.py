@@ -42,6 +42,7 @@ def evaluate_policy(model, indiv_task_num, env, n_eval_episodes=10, deterministi
         assert env.num_envs == 1, "You must pass only one environment when using this function"
 
     episode_rewards, n_steps = [], 0
+    episode_rewards_actual = []
     for _ in range(n_eval_episodes):
         obs = env.reset()
         # Apply visual transformation that matches that of corresponding indiv task
@@ -59,11 +60,18 @@ def evaluate_policy(model, indiv_task_num, env, n_eval_episodes=10, deterministi
             n_steps += 1
             if render:
                 env.render()
+        # Store clipped episode rewards and actual episode rewards
         episode_rewards.append(episode_reward)
+        import pdb; pdb.set_trace()
+        # episode_reward_actual = _info[0]['episode']['r']
+        episode_reward_actual = 1
+        assert episode_reward_actual is not None, "Error: ep_reward_actual is None"
+        episode_rewards_actual.append(episode_reward_actual)
     mean_reward = np.mean(episode_rewards)
+    mean_reward_actual = np.mean(episode_rewards_actual)
     if reward_threshold is not None:
         assert mean_reward > reward_threshold, 'Mean reward below threshold: '\
                                          '{:.2f} < {:.2f}'.format(mean_reward, reward_threshold)
     if return_episode_rewards:
-        return episode_rewards, n_steps
-    return mean_reward, n_steps
+        return episode_rewards, episode_rewards_actual, n_steps
+    return mean_reward, mean_reward_actual, n_steps
