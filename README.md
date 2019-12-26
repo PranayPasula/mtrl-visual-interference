@@ -1,2 +1,2 @@
-# rl-visual-interference-openai
-multitask reinforcement learning visual interference experiment using openai-baselines
+# mtrl-visual-interference
+experiment to assess visual interference in multi-task reinforcement learning due to visual dissimilarities across source tasks. adapted from openai baselines.
