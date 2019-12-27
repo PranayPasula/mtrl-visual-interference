@@ -31,8 +31,8 @@ if __name__ == '__main__':
             print('training at timestep {}...'.format(n_steps))
         n_steps += 1
 
-    n_indiv = 4
-    n_multi = 1
+    n_indiv = 2
+    n_multi = 2
 
     env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_indiv)]
     multi_env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_multi)]
@@ -47,16 +47,21 @@ if __name__ == '__main__':
                         unwrapped_indiv_envs=[],
                         indiv_agent_dones = [threading.Event() for i in range(n_indiv)],
                         multi_agent_dones = [threading.Event() for i in range(n_multi)],
+                        indiv_agent_step_dones = [threading.Event() for i in range(n_indiv)],
+                        multi_agent_step_dones = [threading.Event() for i in range(n_multi)],
+                        goto_next_step = threading.Event(),
+                        goto_next_barrier = threading.Barrier(n_indiv + n_multi),
                         all_timesteps_same= threading.Event(),
                         indiv_allow = threading.Event(),
                         multi_allow = threading.Event(),
-                        learning_starts_ev = threading.Event())
+                        learning_starts_ev = [threading.Event() for i in range(n_indiv)])
 
     # Set Events so that indiv and multitask agents are properly synchronized
     for i in range(n_indiv):
         shared_stuff['indiv_agent_dones'][i].set()
+        shared_stuff['indiv_agent_step_dones'][i].clear()
     for i in range(n_multi):
-        shared_stuff['multi_agent_dones'][i].set()
+        shared_stuff['multi_agent_step_dones'][i].clear()
     shared_stuff['all_timesteps_same'].set()
     shared_stuff['indiv_allow'].set() 
 
@@ -83,7 +88,7 @@ if __name__ == '__main__':
     # init model and then run training process.
     # thread function
     def create_model_then_learn(shared_stuff, model_type, model_num, policy_type, env, 
-                            learning_starts=200, prioritized_replay=False, batch_size=32, verbose=0):
+                            learning_starts=100, prioritized_replay=False, batch_size=32, verbose=0):
         global logdirs
         assert model_type == 'i' or 'm', "invalid model type"
         if model_type == 'm':
@@ -104,7 +109,7 @@ if __name__ == '__main__':
         print("{} task DQN {} created".format(model_type_str, model_num))
         print("{} task DQN {} begins learning...".format(model_type_str, model_num))
 
-        model.learn(total_timesteps=3000, callback=callback, tb_log_name="DQN_{}_{}".format(model_type, model_num))
+        model.learn(total_timesteps=300, callback=callback, tb_log_name="DQN_{}_{}".format(model_type, model_num))
 
         print("{} task DQN {} done learning!".format(model_type_str, model_num))
 
@@ -165,7 +170,7 @@ if __name__ == '__main__':
         indiv_thread.start()
         time.sleep(1) 
 
-    time.sleep(5)
+    time.sleep(3)
 
     # start multitask model threads
     for multi_thread in multi_threads:

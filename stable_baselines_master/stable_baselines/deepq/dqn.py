@@ -1,6 +1,7 @@
 from functools import partial
 from collections import OrderedDict
 
+import threading
 import sys
 import time
 import tensorflow as tf
@@ -309,11 +310,16 @@ class DQN(OffPolicyRLModel):
                         reset = True
                 
                     if self.num_timesteps > self.learning_starts:
+                        self.shared_stuff['learning_starts_ev'][self.model_num].set()
+                        for i in self.shared_stuff['learning_starts_ev']:
+                            i.wait()
                         self.shared_stuff['indiv_agent_dones'][self.model_num].set()
-                        if all([indiv_task_done.is_set() for indiv_task_done in self.shared_stuff['indiv_agent_dones']]):
-                            self.shared_stuff['indiv_allow'].clear()
-                            self.shared_stuff['multi_allow'].set()
-                            self.shared_stuff['learning_starts_ev'].set()
+                        for i in self.shared_stuff['indiv_agent_dones']:
+                            i.wait()
+                        self.shared_stuff['indiv_agent_dones'][self.model_num].clear()
+                        self.shared_stuff['indiv_allow'].clear()
+                        self.shared_stuff['multi_allow'].set()
+
 
                 # obses_t, actions, rewards, obses_tp1, obses_tp1, dones, weights, batch_idxes = [False for i in range(8)]
                 if self.model_type == 'i': # MYEDIT different replay buffer sampling for indiv vs multi models
@@ -361,8 +367,10 @@ class DQN(OffPolicyRLModel):
 
                 elif self.model_type == 'm':
                     # don't let multitask agents start learning until the indiv tasks all start learning
-                    if not self.shared_stuff['learning_starts_ev'].is_set():
+                    if not all([i.is_set() for i in self.shared_stuff['learning_starts_ev']]):
                         self.shared_stuff['multi_allow'].wait()
+                        self.num_timesteps = self.learning_starts + 1
+                    elif self.num_timesteps <= self.learning_starts:
                         self.num_timesteps = self.learning_starts + 1
                     n_indiv = len(self.shared_stuff['indiv_replay_buffers'])
                     indiv_model_batch_size = int(self.batch_size / n_indiv) # bc (multi model batch size) = n_indiv * (indiv model batch size)
@@ -395,9 +403,10 @@ class DQN(OffPolicyRLModel):
                                     experience = np.concatenate((experience, exp_buff), axis=1)
                             
                             self.shared_stuff['multi_agent_dones'][self.model_num].set()
-                            if all([multi_task_done.is_set() for multi_task_done in self.shared_stuff['multi_agent_dones']]):
-                                self.shared_stuff['multi_allow'].clear()
-                                self.shared_stuff['indiv_allow'].set()
+                            for i in self.shared_stuff['multi_agent_dones']:
+                                i.wait()
+                            self.shared_stuff['multi_allow'].clear()
+                            self.shared_stuff['indiv_allow'].set()
 
                             # since we sorted by replay buffer index, randomize the order of experiences
                             assert experience.shape[1] == self.batch_size, "error: number of multitask model experiences != multitask model batch size"
@@ -436,10 +445,11 @@ class DQN(OffPolicyRLModel):
                                 # else:
                                 #     experience = np.concatenate((experience, exp_buff), axis=1)
 
-                            self.shared_stuff['multi_agent_dones'][self.model_num].set()
-                            if all([multi_task_done.is_set() for multi_task_done in self.shared_stuff['multi_agent_dones']]):
-                                self.shared_stuff['multi_allow'].clear()
-                                self.shared_stuff['indiv_allow'].set()
+                            # self.shared_stuff['multi_agent_dones'][self.model_num].set()
+                            # for i in self.shared_stuff['multi_agent_dones']:
+                            #     i.wait()
+                            # self.shared_stuff['multi_allow'].clear()
+                            # self.shared_stuff['indiv_allow'].set()
                             
                             assert obses_t.shape[0] == self.batch_size, "error: number of multitask model experiences != multitask model batch size"
                             # since we sorted by replay buffer index, randomize the order of experiences
@@ -501,14 +511,14 @@ class DQN(OffPolicyRLModel):
                         print("indiv agent {} has avg reward {}".format(self.model_num, mean_10ep_reward_actual))
 
                     elif self.model_type =='m':
-                        
-                        self.shared_stuff['learning_starts_ev'].wait()
+                        for i in self.shared_stuff['learning_starts_ev']:
+                            i.wait()
 
                         print("multi_agent {}".format(self.model_num))
 
-                        self.shared_stuff['multi_allow'].wait()
-                        self.shared_stuff['indiv_allow'].clear()
-                        self.shared_stuff['multi_agent_dones'][self.model_num].clear()
+                        # self.shared_stuff['multi_allow'].wait()
+                        # self.shared_stuff['indiv_allow'].clear()
+                        # self.shared_stuff['multi_agent_dones'][self.model_num].clear()
                         
                         for indiv_task_num in range(len(self.shared_stuff['indiv_replay_buffers'])):
 
@@ -516,18 +526,13 @@ class DQN(OffPolicyRLModel):
                             eval_env = VecFrameStack(copy.deepcopy(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num]), n_stack=4)
 
                             # calling a function inside of a method by passing in self feels like bad practice
-                            episode_rewards, episode_rewards_actual, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=20, return_episode_rewards=True)
+                            episode_rewards, episode_rewards_actual, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=5, return_episode_rewards=True)
                             if len(episode_rewards_actual) > 0:
                                 self.multi_mean_10ep_rewards_actual[indiv_task_num] = round(float(np.mean(episode_rewards_actual)), 1)
                             else:
                                 self.multi_mean_10ep_rewards_actual[indiv_task_num] = 0
 
                             print("multi agent {} has avg reward {} on task {}".format(self.model_num, self.multi_mean_10ep_rewards_actual[indiv_task_num], indiv_task_num))
-                    
-                        self.shared_stuff['multi_agent_dones'][self.model_num].set()
-                        if all([multi_task_done.is_set() for multi_task_done in self.shared_stuff['multi_agent_dones']]):
-                            self.shared_stuff['multi_allow'].clear()
-                            self.shared_stuff['indiv_allow'].set()
 
                     # if self.model_type == 'i':
                     #     num_episodes = len(episode_rewards_actual)
@@ -586,6 +591,13 @@ class DQN(OffPolicyRLModel):
                                 print('Done logging...\n\n')
 
                             self.multi_loggers[indiv_task_num].flush()
+
+                if self.model_type == 'm': 
+                    self.shared_stuff['multi_agent_dones'][self.model_num].set()
+                    for i in self.shared_stuff['multi_agent_dones']:
+                        i.wait()
+                    self.shared_stuff['multi_allow'].clear()
+                    self.shared_stuff['indiv_allow'].set()
                     
                 # num_episodes = len(episode_rewards)
                 # if self.verbose >= 1 and done and log_interval is not None and len(episode_rewards) % log_interval == 0:
@@ -611,8 +623,8 @@ class DQN(OffPolicyRLModel):
                
                
                 self.num_timesteps += 1
-
-                if not self.shared_stuff['learning_starts_ev'].is_set():
+                print("{} {} {}".format(self.model_type, self.model_num, self.num_timesteps))
+                if all([i.is_set() for i in self.shared_stuff['learning_starts_ev']]):
                     
                     # if self.model_type == 'i':
                     #     self.shared_stuff['indiv_timesteps'][self.model_num] = self.num_timesteps
@@ -627,17 +639,39 @@ class DQN(OffPolicyRLModel):
                     # else:
                     #     self.shared_stuff['timestep_comparator'].wait()
 
-                    self.shared_stuff['all_timesteps_same'].wait()
-                    diff_flag = 0
-                    for indiv_timestep in self.shared_stuff['indiv_timesteps']:
-                        for multi_timestep in self.shared_stuff['multi_timesteps']:
-                            if indiv_timestep != multi_timestep:
-                                diff_flag = 1
-                    if diff_flag == 0:
-                        self.shared_stuff['all_timesteps_same'].set()
-                    else:
-                        self.shared_stuff['all_timesteps_same'].clear()
-                        self.shared_stuff['all_timesteps_same'].wait()
+                    # self.shared_stuff['all_timesteps_same'].wait()
+                    # diff_flag = 0
+                    # for indiv_timestep in self.shared_stuff['indiv_timesteps']:
+                    #     for multi_timestep in self.shared_stuff['multi_timesteps']:
+                    #         if indiv_timestep != multi_timestep:
+                    #             diff_flag = 1
+                    # if diff_flag == 0:
+                    #     self.shared_stuff['all_timesteps_same'].set()
+                    # else:
+                    #     self.shared_stuff['all_timesteps_same'].clear()
+                    #     self.shared_stuff['all_timesteps_same'].wait()
+
+                    # self.shared_stuff['goto_next_step'].clear()
+
+                    # if self.model_type == 'i':
+                    #     self.shared_stuff['indiv_agent_step_dones'][self.model_num].set()
+                    # else:
+                    #     self.shared_stuff['multi_agent_step_dones'][self.model_num].set()
+
+                    # if all([indiv_step_done.is_set() for indiv_step_done in self.shared_stuff['indiv_agent_step_dones']]) and \
+                    #             all([multi_step_done.is_set() for multi_step_done in self.shared_stuff['multi_agent_step_dones']]):
+
+                    #     self.shared_stuff['goto_next_step'].set()
+                    #     if self.model_type == 'i':
+                    #         self.shared_stuff['indiv_agent_step_dones'][self.model_num].clear()
+                    #     else:
+                    #         self.shared_stuff['multi_agent_step_dones'][self.model_num].clear()
+                    # else:
+                    #     self.shared_stuff['goto_next_step'].wait()
+                    print(self.shared_stuff['goto_next_barrier'].n_waiting)
+                    self.shared_stuff['goto_next_barrier'].wait()
+                    if (self.model_type == 'i') and (self.model_num == '0'):
+                        self.shared_stuff['goto_next_barrier'] = threading.Barrier(4)
 
         return self
 
