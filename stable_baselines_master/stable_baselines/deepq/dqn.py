@@ -22,6 +22,7 @@ from stable_baselines.a2c.utils import total_episode_reward_logger
 
 import mysettings # for global replay buffers
 
+
 def transform_obs(obs, model_num):
 
     if model_num == 0:
@@ -280,7 +281,7 @@ class DQN(OffPolicyRLModel):
                         self.shared_stuff['indiv_agent_dones'][self.model_num].clear()
 
                     # Update self.shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
-                    if self.num_timesteps % 200 == 0:
+                    if self.num_timesteps % 5000 == 0:
                         self.shared_stuff['unwrapped_indiv_envs'][self.model_num] = copy.deepcopy(self.env.unwrapped)
       
                     # Store transition in the replay buffer.
@@ -316,8 +317,9 @@ class DQN(OffPolicyRLModel):
                         self.shared_stuff['indiv_agent_dones'][self.model_num].set()
                         for i in self.shared_stuff['indiv_agent_dones']:
                             i.wait()
-                        self.shared_stuff['indiv_agent_dones'][self.model_num].clear()
                         self.shared_stuff['indiv_allow'].clear()
+                        if self.shared_stuff['barrier_never_broken'] == True:
+                            self.shared_stuff['indiv_allow'].set()
                         self.shared_stuff['multi_allow'].set()
 
 
@@ -495,7 +497,7 @@ class DQN(OffPolicyRLModel):
 
                 # For indiv-task agent, log mean return over last 10 ep.
                 # For multi-task agent, evaluate policy on each task and log mean returns over some # ep.
-                if (self.num_timesteps > self.learning_starts) and (self.num_timesteps) % 200 == 0:
+                if (self.num_timesteps > self.learning_starts) and (self.num_timesteps) % 5000 == 0:
 
                     print(str(time.time() - start_time) + " sec")
 
@@ -526,7 +528,7 @@ class DQN(OffPolicyRLModel):
                             eval_env = VecFrameStack(copy.deepcopy(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num]), n_stack=4)
 
                             # calling a function inside of a method by passing in self feels like bad practice
-                            episode_rewards, episode_rewards_actual, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=5, return_episode_rewards=True)
+                            episode_rewards, episode_rewards_actual, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=20, return_episode_rewards=True)
                             if len(episode_rewards_actual) > 0:
                                 self.multi_mean_10ep_rewards_actual[indiv_task_num] = round(float(np.mean(episode_rewards_actual)), 1)
                             else:
@@ -623,7 +625,8 @@ class DQN(OffPolicyRLModel):
                
                
                 self.num_timesteps += 1
-                print("{} {} {}".format(self.model_type, self.model_num, self.num_timesteps))
+                if self.num_timesteps % 1000 == 0:
+                    print("{} {} {}".format(self.model_type, self.model_num, self.num_timesteps))
                 if all([i.is_set() for i in self.shared_stuff['learning_starts_ev']]):
                     
                     # if self.model_type == 'i':
@@ -668,10 +671,14 @@ class DQN(OffPolicyRLModel):
                     #         self.shared_stuff['multi_agent_step_dones'][self.model_num].clear()
                     # else:
                     #     self.shared_stuff['goto_next_step'].wait()
+                    
+#                     if self.shared_stuff['goto_next_barrier'].n_waiting == 2:
+#                         self.shared_stuff['indiv_allow'].set()
                     print(self.shared_stuff['goto_next_barrier'].n_waiting)
                     self.shared_stuff['goto_next_barrier'].wait()
                     if (self.model_type == 'i') and (self.model_num == '0'):
-                        self.shared_stuff['goto_next_barrier'] = threading.Barrier(4)
+                        self.shared_stuff['goto_next_barrier'] = threading.Barrier(5)
+                    self.shared_stuff['barrier_never_broken'] = False
 
         return self
 

@@ -24,15 +24,15 @@ if __name__ == '__main__':
 
     n_steps, best_mean_reward = 0, -np.inf
 
+    n_indiv = 4
+    n_multi = 1
+    
     # to print timesteps during learning
     def callback(_locals, _globals):
         global n_steps, best_mean_reward
-        if (n_steps % 100) == 0:
-            print('training at timestep {}...'.format(n_steps))
+        if (n_steps % 400) == 0:
+            print('training at timestep {}...'.format(n_steps // n_indiv))
         n_steps += 1
-
-    n_indiv = 2
-    n_multi = 2
 
     env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_indiv)]
     multi_env_names = ['MsPacmanNoFrameskip-v4' for i in range(n_multi)]
@@ -54,7 +54,8 @@ if __name__ == '__main__':
                         all_timesteps_same= threading.Event(),
                         indiv_allow = threading.Event(),
                         multi_allow = threading.Event(),
-                        learning_starts_ev = [threading.Event() for i in range(n_indiv)])
+                        learning_starts_ev = [threading.Event() for i in range(n_indiv)],
+                        barrier_never_broken = True)
 
     # Set Events so that indiv and multitask agents are properly synchronized
     for i in range(n_indiv):
@@ -63,7 +64,7 @@ if __name__ == '__main__':
     for i in range(n_multi):
         shared_stuff['multi_agent_step_dones'][i].clear()
     shared_stuff['all_timesteps_same'].set()
-    shared_stuff['indiv_allow'].set() 
+    shared_stuff['indiv_allow'].set()
 
 
     indiv_envs = []
@@ -88,14 +89,14 @@ if __name__ == '__main__':
     # init model and then run training process.
     # thread function
     def create_model_then_learn(shared_stuff, model_type, model_num, policy_type, env, 
-                            learning_starts=100, prioritized_replay=False, batch_size=32, verbose=0):
+                            learning_starts=1000, prioritized_replay=False, batch_size=32, verbose=0):
         global logdirs
         assert model_type == 'i' or 'm', "invalid model type"
         if model_type == 'm':
             batch_size = n_indiv * batch_size
         print(type(env))
         model = DQN(policy_type, env, learning_starts=learning_starts, prioritized_replay=prioritized_replay, 
-                    batch_size=batch_size, verbose=verbose, shared_stuff=shared_stuff)
+                    batch_size=batch_size, verbose=verbose, target_network_update_freq=5000, buffer_size=100000 shared_stuff=shared_stuff)
         model.model_type = model_type
         model.model_num = model_num
 
@@ -109,7 +110,7 @@ if __name__ == '__main__':
         print("{} task DQN {} created".format(model_type_str, model_num))
         print("{} task DQN {} begins learning...".format(model_type_str, model_num))
 
-        model.learn(total_timesteps=300, callback=callback, tb_log_name="DQN_{}_{}".format(model_type, model_num))
+        model.learn(total_timesteps=5000000, callback=callback, tb_log_name="DQN_{}_{}".format(model_type, model_num))
 
         print("{} task DQN {} done learning!".format(model_type_str, model_num))
 
@@ -143,9 +144,9 @@ if __name__ == '__main__':
     indiv_threads = []
     multi_threads = [] 
 
-    args = {'learning_starts': 100,
+    args = {'learning_starts': 50000,
             'prioritized_replay': False,
-            'batch_size': 32,
+            'batch_size': 16,
             'verbose': 2}
 
     # spawn indiv task model threads
