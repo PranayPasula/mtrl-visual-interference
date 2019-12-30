@@ -1,0 +1,31 @@
+# import matplotlib
+# matplotlib.use('TkAgg')
+
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
+
+def parse_tf_events_file(filename):
+    train_returns = []
+    for e in tf.train.summary_iterator(filename): # changed from file to filename
+        for v in e.summary.value:
+            if v.tag == 'Train_AverageReturn':
+                train_returns.append(v.simple_value)
+
+    return train_returns
+
+
+if __name__=='__main__':
+
+    filenames = ["data/26-12-2019_10-23-16/DQN_indiv_0_MsPacmanNoFrameskip-v4/events.out.tfevents.1577355818.winter-19-gpu-works-vm"]
+
+    for filename in filenames:
+        train_returns = parse_tf_events_file(filename)
+        plt.plot(train_returns)
+    
+    plt.legend(['1', '2', '3', '1_1', '1_2', '1_3', '2_1', '2_2', '2_3'])
+    plt.show()
+
+
+mtrl-visual-interference/stable_baselines_master/data/26-12-2019_10-23-16/DQN_indiv_0_MsPacmanNoFrameskip-v4/events.out.tfevents.1577355818.winter-19-gpu-works-vm

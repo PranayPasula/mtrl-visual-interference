@@ -309,7 +309,7 @@ class DQN(OffPolicyRLModel):
                             obs = transform_obs(obs, self.model_num)
                         episode_rewards.append(0.0)
                         reset = True
-                
+                        
                     if self.num_timesteps > self.learning_starts:
                         self.shared_stuff['learning_starts_ev'][self.model_num].set()
                         for i in self.shared_stuff['learning_starts_ev']:
@@ -318,8 +318,6 @@ class DQN(OffPolicyRLModel):
                         for i in self.shared_stuff['indiv_agent_dones']:
                             i.wait()
                         self.shared_stuff['indiv_allow'].clear()
-                        if self.shared_stuff['barrier_never_broken'] == True:
-                            self.shared_stuff['indiv_allow'].set()
                         self.shared_stuff['multi_allow'].set()
 
 
@@ -672,14 +670,16 @@ class DQN(OffPolicyRLModel):
                     # else:
                     #     self.shared_stuff['goto_next_step'].wait()
                     
-#                     if self.shared_stuff['goto_next_barrier'].n_waiting == 2:
+#                     if self.shared_stuff['goto_next_barrier'].n_waiting == 1:
 #                         self.shared_stuff['indiv_allow'].set()
-                    print(self.shared_stuff['goto_next_barrier'].n_waiting)
+                    
+                    self.shared_stuff['indiv_agent_dones'][self.model_num].clear()
+        
                     self.shared_stuff['goto_next_barrier'].wait()
                     if (self.model_type == 'i') and (self.model_num == '0'):
                         self.shared_stuff['goto_next_barrier'] = threading.Barrier(5)
                     self.shared_stuff['barrier_never_broken'] = False
-
+                    
         return self
 
     # MYEDIT TODO (make sure of this) predict is used for evaluation only,

@@ -30,7 +30,7 @@ if __name__ == '__main__':
     # to print timesteps during learning
     def callback(_locals, _globals):
         global n_steps, best_mean_reward
-        if (n_steps % 400) == 0:
+        if (n_steps % (100 * n_indiv)) == 0:
             print('training at timestep {}...'.format(n_steps // n_indiv))
         n_steps += 1
 
@@ -59,7 +59,7 @@ if __name__ == '__main__':
 
     # Set Events so that indiv and multitask agents are properly synchronized
     for i in range(n_indiv):
-        shared_stuff['indiv_agent_dones'][i].set()
+        shared_stuff['indiv_agent_dones'][i].clear()
         shared_stuff['indiv_agent_step_dones'][i].clear()
     for i in range(n_multi):
         shared_stuff['multi_agent_step_dones'][i].clear()
@@ -96,7 +96,7 @@ if __name__ == '__main__':
             batch_size = n_indiv * batch_size
         print(type(env))
         model = DQN(policy_type, env, learning_starts=learning_starts, prioritized_replay=prioritized_replay, 
-                    batch_size=batch_size, verbose=verbose, target_network_update_freq=5000, buffer_size=100000 shared_stuff=shared_stuff)
+                    batch_size=batch_size, verbose=verbose, target_network_update_freq=5000, buffer_size=50000, shared_stuff=shared_stuff)
         model.model_type = model_type
         model.model_num = model_num
 
@@ -144,7 +144,7 @@ if __name__ == '__main__':
     indiv_threads = []
     multi_threads = [] 
 
-    args = {'learning_starts': 50000,
+    args = {'learning_starts': 25000,
             'prioritized_replay': False,
             'batch_size': 16,
             'verbose': 2}
