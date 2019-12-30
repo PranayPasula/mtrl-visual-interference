@@ -1,3 +1,7 @@
+plot*
+stable_baselines_master/plot*
+*.png
+
 *.swp
 *.pyc
 *.pkl
