@@ -13,6 +13,7 @@ import copy
 from stable_baselines import logger, deepq
 from stable_baselines.common import tf_util, OffPolicyRLModel, SetVerbosity, TensorboardWriter
 # from stable_baselines.common.evaluation import evaluate_policy # MYEDIT
+from stable_baselines.common.cmd_util import make_atari_env
 from stable_baselines.common.vec_env import VecEnv, VecFrameStack
 
 from stable_baselines.common.schedules import LinearSchedule
@@ -240,6 +241,14 @@ class DQN(OffPolicyRLModel):
                     #     if callback(locals(), globals()) is False:
                     #         break
                     # Take action and update exploration to the newest value
+                    
+                    # Start main indiv/multitask agent synchronization cycle 
+                    # after all indiv task agents start learning.
+                    if self.num_timesteps > self.learning_starts:
+                        self.shared_stuff['indiv_allow'].wait()
+                        self.shared_stuff['multi_allow'].clear()
+                        self.shared_stuff['indiv_agent_dones'][self.model_num].clear()
+                    
                     kwargs = {}
                     if not self.param_noise:
                         update_eps = self.exploration.value(self.num_timesteps)
@@ -273,16 +282,9 @@ class DQN(OffPolicyRLModel):
                     # Induce visual dissimilarity
                     new_obs = transform_obs(new_obs, self.model_num)
 
-                    # Start main indiv/multitask agent synchronization cycle 
-                    # after all indiv task agents start learning.
-                    if self.num_timesteps > self.learning_starts:
-                        self.shared_stuff['indiv_allow'].wait()
-                        self.shared_stuff['multi_allow'].clear()
-                        self.shared_stuff['indiv_agent_dones'][self.model_num].clear()
-
                     # Update self.shared_stuff['unwrapped_indiv_envs'] just before multitask dqns are evaluated
-                    if self.num_timesteps % 5000 == 0:
-                        self.shared_stuff['unwrapped_indiv_envs'][self.model_num] = copy.deepcopy(self.env.unwrapped)
+#                     if self.num_timesteps % 500 == 0:
+#                         self.shared_stuff['unwrapped_indiv_envs'][self.model_num] = copy.deepcopy(self.env.unwrapped)
       
                     # Store transition in the replay buffer.
                     self.replay_buffer.add(obs, action, rew, new_obs, float(done))
@@ -495,7 +497,7 @@ class DQN(OffPolicyRLModel):
 
                 # For indiv-task agent, log mean return over last 10 ep.
                 # For multi-task agent, evaluate policy on each task and log mean returns over some # ep.
-                if (self.num_timesteps > self.learning_starts) and (self.num_timesteps) % 5000 == 0:
+                if (self.num_timesteps > self.learning_starts) and (self.num_timesteps) % self.target_network_update_freq == 0:
 
                     print(str(time.time() - start_time) + " sec")
 
@@ -503,12 +505,18 @@ class DQN(OffPolicyRLModel):
                     if self.model_type == 'i':
                         print(len(episode_rewards_actual))
                         if len(episode_rewards_actual) == 0:
+                            mean_10ep_reward = -np.inf
                             mean_10ep_reward_actual = -np.inf
                         else:
+                            mean_10ep_reward = round(float(np.mean(episode_rewards[-10:])), 1)
                             mean_10ep_reward_actual = round(float(np.mean(episode_rewards_actual[-10:])), 1)
+                        self.indiv_mean_10ep_reward = mean_10ep_reward
                         self.indiv_mean_10ep_reward_actual = mean_10ep_reward_actual
+                        self.indiv_best_mean_10ep_reward = max(self.indiv_best_mean_10ep_reward, mean_10ep_reward)
                         self.indiv_best_mean_10ep_reward_actual = max(self.indiv_best_mean_10ep_reward_actual, mean_10ep_reward_actual)
-                        print("indiv agent {} has avg reward {}".format(self.model_num, mean_10ep_reward_actual))
+                        print("indiv agent {} has avg clipped reward {} and avg actual reward {}".format(self.model_num, 
+                                                                                                         self.indiv_mean_10ep_reward, 
+                                                                                                         self.indiv_mean_10ep_reward_actual))
 
                     elif self.model_type =='m':
                         for i in self.shared_stuff['learning_starts_ev']:
@@ -523,16 +531,22 @@ class DQN(OffPolicyRLModel):
                         for indiv_task_num in range(len(self.shared_stuff['indiv_replay_buffers'])):
 
                             # envs in shared_stuff['unwrapped_indiv_envs'] are unwrapped, so wrap before evaluating policy
-                            eval_env = VecFrameStack(copy.deepcopy(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num]), n_stack=4)
+#                             eval_env = VecFrameStack(self.shared_stuff['unwrapped_indiv_envs'][indiv_task_num], n_stack=4)
+                            eval_env = make_atari_env('MsPacmanNoFrameskip-v4', num_env=1, seed=0)
+                            eval_env = VecFrameStack(eval_env, n_stack=4)
 
                             # calling a function inside of a method by passing in self feels like bad practice
-                            episode_rewards, episode_rewards_actual, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=20, return_episode_rewards=True)
+                            episode_rewards, episode_rewards_actual, _ = evaluate_policy(self, indiv_task_num, eval_env, n_eval_episodes=30, return_episode_rewards=True)
+                            self.multi_mean_10ep_rewards[indiv_task_num] = round(float(np.mean(episode_rewards)), 1)
                             if len(episode_rewards_actual) > 0:
                                 self.multi_mean_10ep_rewards_actual[indiv_task_num] = round(float(np.mean(episode_rewards_actual)), 1)
                             else:
                                 self.multi_mean_10ep_rewards_actual[indiv_task_num] = 0
 
-                            print("multi agent {} has avg reward {} on task {}".format(self.model_num, self.multi_mean_10ep_rewards_actual[indiv_task_num], indiv_task_num))
+                            print("multi agent {} has avg clipped reward {} and avg actual reward {} on task {}".format(self.model_num, 
+                                                                                                                        self.multi_mean_10ep_rewards[indiv_task_num], 
+                                                                                                                        self.multi_mean_10ep_rewards_actual[indiv_task_num], 
+                                                                                                                        indiv_task_num))
 
                     # if self.model_type == 'i':
                     #     num_episodes = len(episode_rewards_actual)
@@ -549,11 +563,15 @@ class DQN(OffPolicyRLModel):
                         logs["Train_EnvstepsSoFar"] = self.num_timesteps
                         print("Timestep %d" % (self.num_timesteps,))
                         if self.indiv_mean_10ep_reward_actual > -1000:
-                            logs["Train_AverageReturn"] = self.indiv_mean_10ep_reward_actual
-                            print("mean reward (10 episodes) %f" % self.indiv_mean_10ep_reward_actual)
+                            logs["Train_AverageReturnClipped"] = self.indiv_mean_10ep_reward
+                            logs["Train_AverageReturnActual"] = self.indiv_mean_10ep_reward_actual
+                            print("mean clipped reward (10 episodes) %f" % self.indiv_mean_10ep_reward)
+                            print("mean actual reward (10 episodes) %f" % self.indiv_mean_10ep_reward_actual)
                         if self.indiv_best_mean_10ep_reward_actual > -1000:
-                            logs["Train_BestReturn"] = self.indiv_best_mean_10ep_reward_actual
-                            print("best mean reward %f" % self.indiv_best_mean_10ep_reward_actual)
+                            logs["Train_BestReturnClipped"] = self.indiv_best_mean_10ep_reward
+                            logs["Train_BestReturnActual"] = self.indiv_best_mean_10ep_reward_actual
+                            print("best mean clipped reward %f" % self.indiv_best_mean_10ep_reward)
+                            print("best mean actual reward %f" % self.indiv_best_mean_10ep_reward_actual)
                         if start_time is not None:
                             time_since_start = (time.time() - start_time)
                             print("running time %f" % time_since_start)
@@ -573,11 +591,15 @@ class DQN(OffPolicyRLModel):
                             logs["Train_EnvstepsSoFar"] = self.num_timesteps
                             print("Timestep %d" % (self.num_timesteps,))
                             if self.multi_mean_10ep_rewards_actual[indiv_task_num] > -1000:
-                                logs["Train_AverageReturn"] = self.multi_mean_10ep_rewards_actual[indiv_task_num]
-                                print("mean reward (10 episodes) %f" % self.multi_mean_10ep_rewards_actual[indiv_task_num])
+                                logs["Train_AverageReturnClipped"] = self.multi_mean_10ep_rewards[indiv_task_num]
+                                logs["Train_AverageReturnActual"] = self.multi_mean_10ep_rewards_actual[indiv_task_num]
+                                print("mean clipped reward (10 episodes) %f" % self.multi_mean_10ep_rewards[indiv_task_num])
+                                print("mean actual reward (10 episodes) %f" % self.multi_mean_10ep_rewards_actual[indiv_task_num])
                             if self.multi_best_mean_10ep_rewards_actual[indiv_task_num] > -1000:
-                                logs["Train_BestReturn"] = self.multi_best_mean_10ep_rewards_actual[indiv_task_num]
-                                print("best mean reward %f" % self.multi_best_mean_10ep_rewards_actual[indiv_task_num])
+                                logs["Train_BestReturnClipped"] = self.multi_best_mean_10ep_rewards[indiv_task_num]
+                                logs["Train_BestReturnActual"] = self.multi_best_mean_10ep_rewards_actual[indiv_task_num]
+                                print("best mean clipped reward %f" % self.multi_best_mean_10ep_rewards[indiv_task_num])
+                                print("best mean actual reward %f" % self.multi_best_mean_10ep_rewards_actual[indiv_task_num])
                             if start_time is not None:
                                 time_since_start = (time.time() - start_time)
                                 print("running time %f" % time_since_start)

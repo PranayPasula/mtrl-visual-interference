@@ -24,7 +24,7 @@ if __name__ == '__main__':
 
     n_steps, best_mean_reward = 0, -np.inf
 
-    n_indiv = 4
+    n_indiv = 2
     n_multi = 1
     
     # to print timesteps during learning
@@ -95,7 +95,7 @@ if __name__ == '__main__':
         if model_type == 'm':
             batch_size = n_indiv * batch_size
         print(type(env))
-        model = DQN(policy_type, env, learning_starts=learning_starts, prioritized_replay=prioritized_replay, 
+        model = DQN(policy_type, env, learning_rate=1e-4, learning_starts=learning_starts, prioritized_replay=prioritized_replay, 
                     batch_size=batch_size, verbose=verbose, target_network_update_freq=5000, buffer_size=50000, shared_stuff=shared_stuff)
         model.model_type = model_type
         model.model_num = model_num
